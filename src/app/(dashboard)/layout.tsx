@@ -1,14 +1,32 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
 import { PageSkeleton } from '@/components/ui/skeleton';
 
+// Maximum ms we'll show the loader before giving up and rendering anyway.
+// Prevents the "stuck on loading" UX even if bootstrap never resolves.
+const LOADING_TIMEOUT_MS = 5000;
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { isLoading } = useAuth();
+  const [timedOut, setTimedOut] = useState(false);
 
-  if (isLoading) {
+  // Safety valve: if auth hasn't resolved in 5 s, render the shell anyway
+  useEffect(() => {
+    if (!isLoading) {
+      setTimedOut(false);
+      return;
+    }
+    const t = setTimeout(() => setTimedOut(true), LOADING_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [isLoading]);
+
+  const showLoader = isLoading && !timedOut;
+
+  if (showLoader) {
     return (
       <div className="min-h-screen bg-surface-50 flex items-center justify-center">
         <div className="text-center animate-pulse-soft">
@@ -27,7 +45,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <div className="ml-64">
         <Header />
         <main className="p-6">
-          {isLoading ? <PageSkeleton /> : children}
+          {children}
         </main>
       </div>
     </div>

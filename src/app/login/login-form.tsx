@@ -5,11 +5,11 @@ import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 
 export function LoginForm() {
-  const [email, setEmail] = useState('');
+  const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError]       = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const router = useRouter();
+  const router  = useRouter();
   const supabase = createClient();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -18,17 +18,32 @@ export function LoginForm() {
     setIsLoading(true);
 
     try {
-      const { error: authError } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+      const { error: authError } = await supabase.auth.signInWithPassword({ email, password });
 
       if (authError) {
         setError(authError.message);
         return;
       }
 
-      router.push('/dashboard');
+      // Fetch role so we can route to the right landing page.
+      // This is a separate call AFTER signInWithPassword returns so the
+      // Supabase client is fully idle before we hit the DB.
+      const { data: { user } } = await supabase.auth.getUser();
+      let destination = '/dashboard'; // owner / manager default
+
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .single();
+
+        const role = (profile as { role?: string } | null)?.role;
+        // Cashiers land on POS — it's lighter and immediately useful
+        if (role === 'cashier') destination = '/pos';
+      }
+
+      router.push(destination);
       router.refresh();
     } catch {
       setError('An unexpected error occurred. Please try again.');

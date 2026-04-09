@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, useCallback, useMemo } from 'react';
+import { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import type { User } from '@supabase/supabase-js';
 import type { Profile, Branch, UserRole } from '@/types/database';
@@ -23,95 +23,94 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [branches, setBranches] = useState<Branch[]>([]);
+  const [user, setUser]               = useState<User | null>(null);
+  const [profile, setProfile]         = useState<Profile | null>(null);
+  const [branches, setBranches]       = useState<Branch[]>([]);
   const [selectedBranch, setSelectedBranch] = useState<Branch | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading]     = useState(true);
 
+  // Stable client reference — never recreated
   const supabase = useMemo(() => createClient(), []);
 
-  const fetchProfile = useCallback(async (userId: string): Promise<Profile | null> => {
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', userId)
-      .single();
-    return (data as Profile | null);
-  }, [supabase]);
+  // Guard against concurrent bootstrap calls (e.g. rapid SIGNED_IN events)
+  const bootstrapInFlight = useRef(false);
 
-  const fetchBranches = useCallback(async (): Promise<Branch[]> => {
-    const { data } = await supabase
-      .from('branches')
-      .select('*')
-      .eq('is_active', true)
-      .order('name');
-    return (data as Branch[] | null) || [];
+  // ─── Core data-fetch helper ──────────────────────────────────
+  // Deliberately NOT called inside onAuthStateChange to avoid the
+  // Supabase client deadlock described here:
+  // https://supabase.com/docs/guides/auth/auth-helpers/nextjs#auth-state-change
+  const bootstrap = useCallback(async (authUser: User) => {
+    if (bootstrapInFlight.current) return;
+    bootstrapInFlight.current = true;
+
+    try {
+      const [profileRes, branchRes] = await Promise.all([
+        supabase.from('profiles').select('*').eq('id', authUser.id).single(),
+        supabase.from('branches').select('*').eq('is_active', true).order('name'),
+      ]);
+
+      const profileData = profileRes.data as Profile | null;
+      const branchData  = (branchRes.data as Branch[] | null) ?? [];
+
+      if (profileData) {
+        setProfile(profileData);
+
+        // Set default branch without clearing it if already chosen
+        setSelectedBranch(prev => {
+          if (prev) return prev; // keep existing selection
+          if (profileData.role === 'owner') return branchData[0] ?? null;
+          return branchData.find(b => b.id === profileData.branch_id) ?? null;
+        });
+      }
+
+      setBranches(branchData);
+    } catch (err) {
+      console.error('Auth bootstrap error:', err);
+    } finally {
+      bootstrapInFlight.current = false;
+      setIsLoading(false);
+    }
   }, [supabase]);
 
   const refreshProfile = useCallback(async () => {
     if (!user) return;
-    const profileData = await fetchProfile(user.id);
-    if (profileData) setProfile(profileData);
-  }, [user, fetchProfile]);
+    const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
+    if (data) setProfile(data as Profile);
+  }, [user, supabase]);
 
+  // ─── Auth initialisation ─────────────────────────────────────
   useEffect(() => {
-    const init = async () => {
-      try {
-        const { data: { user: authUser } } = await supabase.auth.getUser();
-
-        if (authUser) {
-          setUser(authUser);
-          const [profileData, branchData] = await Promise.all([
-            fetchProfile(authUser.id),
-            fetchBranches(),
-          ]);
-
-          if (profileData) {
-            setProfile(profileData);
-            // Set default selected branch
-            if (profileData.role === 'owner') {
-              // Owner defaults to first branch or all
-              setSelectedBranch(branchData[0] || null);
-            } else if (profileData.branch_id) {
-              const userBranch = branchData.find(b => b.id === profileData.branch_id);
-              setSelectedBranch(userBranch || null);
-            }
-          }
-          setBranches(branchData);
-        }
-      } catch (error) {
-        console.error('Auth init error:', error);
-      } finally {
+    // 1. Fetch current session once on mount
+    supabase.auth.getUser().then(({ data: { user: authUser } }) => {
+      if (authUser) {
+        setUser(authUser);
+        bootstrap(authUser);
+      } else {
         setIsLoading(false);
       }
-    };
+    });
 
-    init();
-
+    // 2. Listen for auth events — keep the callback SYNCHRONOUS.
+    //    All async work is deferred via queueMicrotask so the Supabase
+    //    client is free before we make more requests.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
+      (event, session) => {
         if (event === 'SIGNED_IN' && session?.user) {
+          // Only update user state synchronously; defer Supabase fetches
           setUser(session.user);
-          const [profileData, branchData] = await Promise.all([
-            fetchProfile(session.user.id),
-            fetchBranches(),
-          ]);
-          if (profileData) {
-            setProfile(profileData);
-            if (profileData.role === 'owner') {
-              setSelectedBranch(branchData[0] || null);
-            } else if (profileData.branch_id) {
-              const userBranch = branchData.find(b => b.id === profileData.branch_id);
-              setSelectedBranch(userBranch || null);
-            }
-          }
-          setBranches(branchData);
+          setIsLoading(true);
+          queueMicrotask(() => bootstrap(session.user!));
+
         } else if (event === 'SIGNED_OUT') {
           setUser(null);
           setProfile(null);
           setBranches([]);
           setSelectedBranch(null);
+          setIsLoading(false);
+
+        } else if (event === 'TOKEN_REFRESHED' && session?.user) {
+          // Token silently refreshed — just update the user object, no re-fetch
+          setUser(session.user);
         }
       }
     );
@@ -119,11 +118,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => subscription.unsubscribe();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const signOut = async () => {
+  const signOut = useCallback(async () => {
     await supabase.auth.signOut();
-  };
+  }, [supabase]);
 
-  const role = profile?.role || null;
+  const role = profile?.role ?? null;
 
   return (
     <AuthContext.Provider
@@ -134,7 +133,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         selectedBranch,
         setSelectedBranch,
         isLoading,
-        isOwner: role === 'owner',
+        isOwner:   role === 'owner',
         isManager: role === 'manager',
         isCashier: role === 'cashier',
         role,
@@ -149,8 +148,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
+  if (!context) throw new Error('useAuth must be used within an AuthProvider');
   return context;
 }
