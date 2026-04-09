@@ -55,7 +55,20 @@ export async function POST(request: NextRequest) {
       .single();
 
     const currentQty = currentInventory ? (currentInventory as Record<string, unknown>).quantity as number : 0;
-    const newQty = Math.max(0, currentQty + quantity_change);
+
+    // ─── [P2 FIX] Never silently clamp — surface the error ──
+    // For removals, reject if stock would go negative. This prevents the audit
+    // log from recording a quantity_change that wasn't actually honoured.
+    const isRemoval = quantity_change < 0;
+    if (isRemoval && Math.abs(quantity_change) > currentQty) {
+      return NextResponse.json({
+        error: `Insufficient stock. Requested removal: ${Math.abs(quantity_change)}, ` +
+               `current quantity: ${currentQty}`
+      }, { status: 400 });
+    }
+
+    const newQty = currentQty + quantity_change; // quantity_change is negative for removals
+
 
     let inventoryId: string;
 

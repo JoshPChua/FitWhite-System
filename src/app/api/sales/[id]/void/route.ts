@@ -5,7 +5,12 @@ import type { Profile } from '@/types/database';
 
 /**
  * POST /api/sales/[id]/void
- * Voids a sale (must be same day, same branch). Only owner/manager.
+ *
+ * Security fix applied:
+ *   [P1] Partial-refund sales can no longer be voided. This prevents
+ *        double-restocking — inventory was already partially returned during
+ *        the refund flow, and a void would return it all again.
+ *        A partial-refund sale must be fully refunded first.
  */
 export async function POST(
   request: NextRequest,
@@ -42,13 +47,21 @@ export async function POST(
       return NextResponse.json({ error: 'Cannot void sales from another branch' }, { status: 403 });
     }
 
-    // Only completed or partial_refund can be voided
+    // ─── [P1 FIX] Block voiding of already-refunded states ──
     if (sale.status === 'voided') {
       return NextResponse.json({ error: 'Sale is already voided' }, { status: 400 });
     }
     if (sale.status === 'refunded') {
       return NextResponse.json({ error: 'Cannot void a fully refunded sale' }, { status: 400 });
     }
+    if (sale.status === 'partial_refund') {
+      return NextResponse.json({
+        error: 'Cannot void a partially refunded sale — inventory was already partially restocked. ' +
+               'Issue a full refund for the remaining amount first.'
+      }, { status: 400 });
+    }
+
+    // Only 'completed' sales reach here
 
     // Void the sale
     const { error: voidError } = await adminClient
@@ -58,7 +71,8 @@ export async function POST(
 
     if (voidError) return NextResponse.json({ error: voidError.message }, { status: 500 });
 
-    // Restore inventory for product items
+    // Restore inventory for ALL product items (no prior partial restock since
+    // we only allow voiding of 'completed' sales now)
     const { data: saleItems } = await adminClient
       .from('sale_items')
       .select('product_id, quantity, name')

@@ -6,16 +6,11 @@ import type { Profile } from '@/types/database';
 /**
  * POST /api/sales/[id]/refund
  *
- * Processes a partial or full refund.
- * Body:
- * {
- *   refund_type: 'product' | 'service' | 'consumed'
- *   amount: number
- *   reason: string
- *   notes?: string
- *   return_inventory?: boolean
- *   refund_items: Array<{ sale_item_id: string; quantity: number; amount: number }>
- * }
+ * Security fixes applied:
+ *   [P1] Amount check now accounts for ALL prior refunds — cumulative refunds
+ *        cannot exceed the original sale total.
+ *   [P1] refund_items[].sale_item_id is validated to belong to this sale, and
+ *        the requested quantity cannot exceed the still-refundable quantity.
  */
 export async function POST(
   request: NextRequest,
@@ -70,11 +65,75 @@ export async function POST(
     if (sale.status === 'voided' || sale.status === 'refunded') {
       return NextResponse.json({ error: `Cannot refund a ${sale.status} sale` }, { status: 400 });
     }
-    if (amount > (sale.total as number)) {
-      return NextResponse.json({ error: `Refund amount (₱${amount}) exceeds sale total (₱${sale.total})` }, { status: 400 });
+
+    // ─── [P1 FIX] Cumulative refund check ───────────────────
+    // Fetch the sum of all prior refunds on this sale.
+    const { data: priorRefundsData } = await adminClient
+      .from('refunds')
+      .select('amount')
+      .eq('sale_id', saleId);
+
+    const priorRefundTotal = ((priorRefundsData || []) as Record<string, unknown>[])
+      .reduce((sum, r) => sum + Number(r.amount), 0);
+
+    const saleTotal = sale.total as number;
+    const remainingRefundable = saleTotal - priorRefundTotal;
+
+    if (amount > remainingRefundable) {
+      return NextResponse.json({
+        error: `Refund amount (₱${amount.toFixed(2)}) exceeds remaining refundable amount ` +
+               `(₱${remainingRefundable.toFixed(2)} of original ₱${saleTotal.toFixed(2)})`
+      }, { status: 400 });
     }
 
-    // Create refund record
+    // ─── [P1 FIX] Validate refund_items belong to this sale ─
+    if (refund_items.length > 0) {
+      // Fetch all valid sale items for this sale
+      const { data: salItemsData } = await adminClient
+        .from('sale_items')
+        .select('id, quantity, item_type, product_id')
+        .eq('sale_id', saleId);
+
+      const validSaleItems = new Map(
+        ((salItemsData || []) as Record<string, unknown>[]).map(si => [si.id as string, si])
+      );
+
+      // Fetch already-refunded quantities per sale_item
+      const { data: priorItemsData } = await adminClient
+        .from('refund_items')
+        .select('sale_item_id, quantity')
+        .in('sale_item_id', [...validSaleItems.keys()]);
+
+      const refundedQtyMap = new Map<string, number>();
+      for (const ri of (priorItemsData || []) as Record<string, unknown>[]) {
+        const key = ri.sale_item_id as string;
+        refundedQtyMap.set(key, (refundedQtyMap.get(key) ?? 0) + (ri.quantity as number));
+      }
+
+      for (const ri of refund_items) {
+        // Must belong to this sale
+        if (!validSaleItems.has(ri.sale_item_id)) {
+          return NextResponse.json({
+            error: `sale_item_id ${ri.sale_item_id} does not belong to sale ${saleId}`
+          }, { status: 400 });
+        }
+
+        const saleItem = validSaleItems.get(ri.sale_item_id)!;
+        const originalQty = saleItem.quantity as number;
+        const alreadyRefunded = refundedQtyMap.get(ri.sale_item_id) ?? 0;
+        const stillRefundable = originalQty - alreadyRefunded;
+
+        if (ri.quantity > stillRefundable) {
+          return NextResponse.json({
+            error: `Requested refund quantity (${ri.quantity}) exceeds still-refundable ` +
+                   `quantity (${stillRefundable}) for item ${ri.sale_item_id}`
+          }, { status: 400 });
+        }
+      }
+    }
+
+    // ─── Create refund record ────────────────────────────────
+
     const { data: refundData, error: refundError } = await adminClient
       .from('refunds')
       .insert({
@@ -93,7 +152,8 @@ export async function POST(
     if (refundError) return NextResponse.json({ error: refundError.message }, { status: 500 });
     const refundId = (refundData as Record<string, unknown>).id as string;
 
-    // Insert refund items
+    // ─── Insert refund items & optionally restore inventory ──
+
     if (refund_items.length > 0) {
       const refundItemsPayload = refund_items.map(ri => ({
         refund_id: refundId,
@@ -103,13 +163,13 @@ export async function POST(
       }));
       await adminClient.from('refund_items').insert(refundItemsPayload as Record<string, unknown>[]);
 
-      // Restore inventory if requested
       if (return_inventory) {
         for (const ri of refund_items) {
           const { data: saleItem } = await adminClient
             .from('sale_items')
             .select('product_id, quantity')
             .eq('id', ri.sale_item_id)
+            .eq('sale_id', saleId)   // re-scoped to this sale for safety
             .eq('item_type', 'product')
             .single();
 
@@ -144,9 +204,12 @@ export async function POST(
       }
     }
 
-    // Determine new sale status: full refund vs partial
-    const isFullRefund = Math.abs(amount - (sale.total as number)) < 0.01;
+    // ─── Determine new sale status ───────────────────────────
+
+    const newTotalRefunded = priorRefundTotal + amount;
+    const isFullRefund = Math.abs(newTotalRefunded - saleTotal) < 0.01;
     const newStatus = isFullRefund ? 'refunded' : 'partial_refund';
+
     await adminClient
       .from('sales')
       .update({ status: newStatus } as Record<string, unknown>)
@@ -160,7 +223,10 @@ export async function POST(
       entity_type: 'sale',
       entity_id: saleId,
       description: `${isFullRefund ? 'Full' : 'Partial'} refund ₱${amount.toFixed(2)} on ${sale.receipt_number as string} — ${reason}`,
-      metadata: { refund_id: refundId, amount, reason, return_inventory, is_full: isFullRefund },
+      metadata: {
+        refund_id: refundId, amount, reason, return_inventory,
+        is_full: isFullRefund, prior_refund_total: priorRefundTotal,
+      },
     } as Record<string, unknown>);
 
     return NextResponse.json({ success: true, refund_id: refundId, new_status: newStatus });
