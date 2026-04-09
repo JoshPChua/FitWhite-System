@@ -1,5 +1,6 @@
 -- ============================================================
 -- FitWhite Aesthetics POS - Seed Data
+-- SAFE TO RE-RUN: uses ON CONFLICT DO NOTHING throughout
 -- Run this AFTER the auth users have been seeded via the script
 -- ============================================================
 
@@ -16,16 +17,22 @@ INSERT INTO branches (id, name, code, type, is_active, reporting_restricted) VAL
   ('b0000001-0000-0000-0000-000000000008', 'Calamba',      'CLB', 'managed', TRUE, TRUE),
   ('b0000001-0000-0000-0000-000000000009', 'Paranaque',    'PRQ', 'managed', TRUE, TRUE),
   ('b0000001-0000-0000-0000-000000000010', 'Quezon City',  'QC',  'managed', TRUE, TRUE),
-  ('b0000001-0000-0000-0000-000000000011', 'Baclaran',     'BCR', 'managed', TRUE, TRUE);
+  ('b0000001-0000-0000-0000-000000000011', 'Baclaran',     'BCR', 'managed', TRUE, TRUE)
+ON CONFLICT (id) DO NOTHING;
 
 -- ─── SERVICES (from actual FitWhite menu) ───────────────────
--- We insert for ALL branches using a CTE
+-- Safe to re-run: skips branch if it already has services
 
 DO $$
 DECLARE
   branch_rec RECORD;
+  svc_count  INT;
 BEGIN
   FOR branch_rec IN SELECT id FROM branches LOOP
+
+    -- Skip this branch if services are already seeded
+    SELECT COUNT(*) INTO svc_count FROM services WHERE branch_id = branch_rec.id;
+    CONTINUE WHEN svc_count > 0;
 
     -- IV Treatments
     INSERT INTO services (branch_id, name, category, price, duration_minutes) VALUES
@@ -315,13 +322,19 @@ BEGIN
 END $$;
 
 -- ─── PRODUCTS & INVENTORY (from actual FitWhite catalog) ────
+-- Safe to re-run: skips branch if products already exist
 
 DO $$
 DECLARE
   branch_rec RECORD;
-  prod_id UUID;
+  prod_id    UUID;
+  prod_count INT;
 BEGIN
   FOR branch_rec IN SELECT id FROM branches LOOP
+
+    -- Skip this branch if products are already seeded
+    SELECT COUNT(*) INTO prod_count FROM products WHERE branch_id = branch_rec.id;
+    CONTINUE WHEN prod_count > 0;
 
     -- IV Boosters
     INSERT INTO products (id, branch_id, name, category, price, unit) VALUES (gen_random_uuid(), branch_rec.id, 'Stemcell Booster', 'IV Boosters', 500, 'vial') RETURNING id INTO prod_id;
