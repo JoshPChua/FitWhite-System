@@ -59,7 +59,7 @@ function BarChart({ data, max, color = '#4f6ef7' }: { data: number[]; max: numbe
 // ─── Component ──────────────────────────────────────────────
 
 export default function ReportsPage() {
-  const { isOwner, isManager, selectedBranch, branches } = useAuth();
+  const { isOwner, isManager, selectedBranch, profile, branches } = useAuth();
   const [data, setData] = useState<ReportData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [filterBranch, setFilterBranch] = useState('');
@@ -72,7 +72,11 @@ export default function ReportsPage() {
   const fetchReports = useCallback(async () => {
     setIsLoading(true);
     try {
-      const branchFilter = !isOwner && selectedBranch?.id ? selectedBranch.id : filterBranch || null;
+      // P1 fix: non-owners are ALWAYS scoped to their branch — profile.branch_id is the
+      // authoritative fallback so the filterBranch picker can't open unscoped data.
+      const branchFilter = isOwner
+        ? (filterBranch || null)
+        : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
 
       const periodDays = filterPeriod === '7d' ? 7 : filterPeriod === '30d' ? 30 : filterPeriod === '90d' ? 90 : null;
       const dateFrom = periodDays
@@ -206,7 +210,7 @@ export default function ReportsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [supabase, isOwner, selectedBranch?.id, filterBranch, filterPeriod]);
+  }, [supabase, isOwner, selectedBranch?.id, profile?.branch_id, filterBranch, filterPeriod]);
 
   useEffect(() => { fetchReports(); }, [fetchReports]);
 

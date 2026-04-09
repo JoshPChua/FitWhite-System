@@ -55,7 +55,11 @@ export default function DashboardPage() {
   const fetchDashboard = useCallback(async () => {
     setIsLoading(true);
     try {
-      const branchFilter = !isOwner && selectedBranch?.id ? selectedBranch.id : null;
+      // P1 fix: non-owners are ALWAYS scoped to their branch — use profile.branch_id as
+      // hard fallback so even a missing selectedBranch can't return unscoped data.
+      const branchFilter = isOwner
+        ? null
+        : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
 
       // Fetch sales stats (with branch join for name resolution in branch perf)
       const salesQuery = branchFilter
