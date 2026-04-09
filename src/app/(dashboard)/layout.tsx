@@ -20,7 +20,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       setTimedOut(false);
       return;
     }
-    const t = setTimeout(() => setTimedOut(true), LOADING_TIMEOUT_MS);
+    const t = setTimeout(() => {
+      // Auth bootstrap did not complete within the timeout.
+      // This can indicate a Supabase connectivity issue or an auth regression.
+      // The shell is rendered anyway to avoid the user being stuck on a spinner.
+      console.error(
+        '[DashboardLayout] Auth bootstrap timed out after',
+        LOADING_TIMEOUT_MS,
+        'ms — rendering shell without auth data. Check Supabase connectivity and auth-provider logs.'
+      );
+      setTimedOut(true);
+    }, LOADING_TIMEOUT_MS);
     return () => clearTimeout(t);
   }, [isLoading]);
 

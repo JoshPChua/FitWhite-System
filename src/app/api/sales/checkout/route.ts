@@ -69,8 +69,9 @@ export async function POST(request: NextRequest) {
 
     const adminClient = createAdminClient();
 
-    // ─── [P1 FIX] Server-side item verification ──────────────
+    // ─── [P1 FIX] Server-side item verification (parallel) ───
     // Fetch real records from DB — never trust client-supplied name/price.
+    // All lookups fire simultaneously via Promise.all for speed.
 
     const verifiedItems: Array<{
       item_type: 'service' | 'product' | 'bundle';
@@ -81,6 +82,7 @@ export async function POST(request: NextRequest) {
       product_id?: string | null;
     }> = [];
 
+    // Validate item_type and quantity first (cheap, no I/O)
     for (const item of items) {
       if (!['service', 'product', 'bundle'].includes(item.item_type)) {
         return NextResponse.json({ error: `Invalid item_type: ${item.item_type}` }, { status: 400 });
@@ -88,76 +90,92 @@ export async function POST(request: NextRequest) {
       if (!item.id || !item.quantity || item.quantity < 1) {
         return NextResponse.json({ error: 'Each item needs a valid id and quantity ≥ 1' }, { status: 400 });
       }
+    }
 
-      if (item.item_type === 'service') {
-        const { data: svc, error: svcErr } = await adminClient
-          .from('services')
-          .select('id, name, price, is_active, branch_id')
-          .eq('id', item.id)
-          .eq('branch_id', branch_id)  // must belong to this branch
-          .eq('is_active', true)
-          .single();
+    // Parallel DB lookups for all items
+    const itemLookupResults = await Promise.all(
+      items.map(async (item) => {
+        if (item.item_type === 'service') {
+          const { data: svc, error: svcErr } = await adminClient
+            .from('services')
+            .select('id, name, price, is_active, branch_id')
+            .eq('id', item.id)
+            .eq('branch_id', branch_id)
+            .eq('is_active', true)
+            .single();
+          return { item, record: svc as Record<string, unknown> | null, err: svcErr };
 
-        if (svcErr || !svc) {
-          return NextResponse.json({
-            error: `Service not found, inactive, or not available in this branch (id: ${item.id})`
-          }, { status: 400 });
+        } else if (item.item_type === 'product') {
+          const { data: prod, error: prodErr } = await adminClient
+            .from('products')
+            .select('id, name, price, is_active, branch_id')
+            .eq('id', item.id)
+            .eq('branch_id', branch_id)
+            .eq('is_active', true)
+            .single();
+          return { item, record: prod as Record<string, unknown> | null, err: prodErr };
+
+        } else {
+          // bundles: extend here when bundle table is fully implemented
+          return { item, record: null, err: new Error('Bundle checkout not yet implemented') };
         }
-        const s = svc as Record<string, unknown>;
+      })
+    );
+
+    // Process lookup results
+    for (const { item, record, err } of itemLookupResults) {
+      if (err || !record) {
+        const typeName = item.item_type.charAt(0).toUpperCase() + item.item_type.slice(1);
+        return NextResponse.json({
+          error: `${typeName} not found, inactive, or not available in this branch (id: ${item.id})`
+        }, { status: 400 });
+      }
+      if (item.item_type === 'service') {
         verifiedItems.push({
           item_type: 'service', id: item.id,
-          name: s.name as string,
-          unit_price: s.price as number,
+          name: record.name as string,
+          unit_price: record.price as number,
           quantity: item.quantity,
         });
-
       } else if (item.item_type === 'product') {
-        const { data: prod, error: prodErr } = await adminClient
-          .from('products')
-          .select('id, name, price, is_active, branch_id')
-          .eq('id', item.id)
-          .eq('branch_id', branch_id)
-          .eq('is_active', true)
-          .single();
-
-        if (prodErr || !prod) {
-          return NextResponse.json({
-            error: `Product not found, inactive, or not available in this branch (id: ${item.id})`
-          }, { status: 400 });
-        }
-        const p = prod as Record<string, unknown>;
         verifiedItems.push({
           item_type: 'product', id: item.id,
-          name: p.name as string,
-          unit_price: p.price as number,
+          name: record.name as string,
+          unit_price: record.price as number,
           quantity: item.quantity,
           product_id: item.id,
         });
       }
-      // bundles: extend here when bundle table is implemented
     }
 
-    // ─── Inventory check (products only) ─────────────────────
+    // ─── Inventory check (products only — parallel) ───────────
 
-    for (const item of verifiedItems.filter(i => i.item_type === 'product')) {
-      const { data: inv } = await adminClient
-        .from('inventory')
-        .select('id, quantity')
-        .eq('product_id', item.id)
-        .eq('branch_id', branch_id)
-        .single();
+    const productItems = verifiedItems.filter(i => i.item_type === 'product');
+    const invResults = await Promise.all(
+      productItems.map(item =>
+        adminClient
+          .from('inventory')
+          .select('id, quantity')
+          .eq('product_id', item.id)
+          .eq('branch_id', branch_id)
+          .single()
+          .then(({ data, error }) => ({ item, inv: data as Record<string, unknown> | null, error }))
+      )
+    );
 
+    for (const { item, inv } of invResults) {
       if (!inv) {
         return NextResponse.json({
           error: `No inventory record found for "${item.name}" in this branch`
         }, { status: 400 });
       }
-      if ((inv as Record<string, unknown>).quantity as number < item.quantity) {
+      if ((inv.quantity as number) < item.quantity) {
         return NextResponse.json({
-          error: `Insufficient stock for "${item.name}". Available: ${(inv as Record<string, unknown>).quantity}, Requested: ${item.quantity}`
+          error: `Insufficient stock for "${item.name}". Available: ${inv.quantity}, Requested: ${item.quantity}`
         }, { status: 400 });
       }
     }
+
 
     // ─── Totals (computed from server-verified prices) ────────
 

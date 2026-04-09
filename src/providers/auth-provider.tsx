@@ -34,12 +34,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Guard against concurrent bootstrap calls (e.g. rapid SIGNED_IN events)
   const bootstrapInFlight = useRef(false);
+  // Monotonic counter — increments on every auth event so a stale in-flight
+  // bootstrap triggered by an older event can't overwrite state after sign-out
+  // or an account switch.
+  const authEpoch = useRef(0);
 
   // ─── Core data-fetch helper ──────────────────────────────────
   // Deliberately NOT called inside onAuthStateChange to avoid the
   // Supabase client deadlock described here:
   // https://supabase.com/docs/guides/auth/auth-helpers/nextjs#auth-state-change
-  const bootstrap = useCallback(async (authUser: User) => {
+  const bootstrap = useCallback(async (authUser: User, epoch: number) => {
     if (bootstrapInFlight.current) return;
     bootstrapInFlight.current = true;
 
@@ -51,6 +55,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const profileData = profileRes.data as Profile | null;
       const branchData  = (branchRes.data as Branch[] | null) ?? [];
+
+      // Epoch check: if auth state changed while we were fetching, discard
+      if (epoch !== authEpoch.current) {
+        bootstrapInFlight.current = false;
+        return;
+      }
 
       if (profileData) {
         setProfile(profileData);
@@ -84,7 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     supabase.auth.getUser().then(({ data: { user: authUser } }) => {
       if (authUser) {
         setUser(authUser);
-        bootstrap(authUser);
+        bootstrap(authUser, authEpoch.current);
       } else {
         setIsLoading(false);
       }
@@ -96,12 +106,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
         if (event === 'SIGNED_IN' && session?.user) {
-          // Only update user state synchronously; defer Supabase fetches
+          // Advance epoch so any in-flight bootstrap for the previous session
+          // will see a mismatch and discard its stale results.
+          authEpoch.current += 1;
+          const currentEpoch = authEpoch.current;
           setUser(session.user);
           setIsLoading(true);
-          queueMicrotask(() => bootstrap(session.user!));
+          queueMicrotask(() => bootstrap(session.user!, currentEpoch));
 
         } else if (event === 'SIGNED_OUT') {
+          authEpoch.current += 1; // invalidate any in-flight bootstrap
           setUser(null);
           setProfile(null);
           setBranches([]);

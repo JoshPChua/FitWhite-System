@@ -4,12 +4,24 @@ import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { Badge } from '@/components/ui/badge';
 
+// PH Timezone offset is UTC+8 fixed — no DST
+function getPHTTime() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila' }));
+}
+
 export function Header() {
   const { profile, branches, selectedBranch, setSelectedBranch, isOwner, signOut } = useAuth();
   const [branchOpen, setBranchOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
   const branchRef = useRef<HTMLDivElement>(null);
   const userRef = useRef<HTMLDivElement>(null);
+
+  // Live Philippine Time clock
+  const [phtTime, setPhtTime] = useState<Date>(getPHTTime());
+  useEffect(() => {
+    const tick = setInterval(() => setPhtTime(getPHTTime()), 1000);
+    return () => clearInterval(tick);
+  }, []);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -23,16 +35,26 @@ export function Header() {
 
   return (
     <header className="h-16 bg-white/80 backdrop-blur-md border-b border-brand-100/60 flex items-center justify-between px-6 sticky top-0 z-30">
-      {/* Left: Page info / breadcrumb space */}
+      {/* Left: Philippine Date & Time */}
       <div className="flex items-center gap-3">
-        <div className="hidden md:block">
-          <p className="text-xs text-brand-400">
-            {new Date().toLocaleDateString('en-PH', {
+        <div className="hidden md:flex flex-col">
+          <p className="text-xs text-brand-500 font-medium">
+            {phtTime.toLocaleDateString('en-PH', {
               weekday: 'long',
               year: 'numeric',
               month: 'long',
               day: 'numeric',
             })}
+          </p>
+          <p className="text-[11px] text-brand-400 tabular-nums">
+            🕐&nbsp;
+            {phtTime.toLocaleTimeString('en-PH', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: true,
+            })}
+            &nbsp;<span className="text-brand-300">PHT</span>
           </p>
         </div>
       </div>

@@ -33,6 +33,13 @@ interface BranchFormData {
 
 // ─── Component ──────────────────────────────────────────────
 
+/**
+ * DEV FLAG — set to `true` to re-enable the "Add Branch" button for the owner.
+ * The API route (/api/branches POST) and all modal/form logic remain fully intact;
+ * only the button is hidden. Flip this to true when the client needs to add branches.
+ */
+const ALLOW_UI_ADD_BRANCH = false;
+
 export default function BranchesPage() {
   const { isOwner } = useAuth();
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -190,16 +197,18 @@ export default function BranchesPage() {
           <h1 className="text-2xl font-display font-semibold text-brand-900">Branch Management</h1>
           <p className="text-sm text-brand-500 mt-1">Manage your clinic locations and settings</p>
         </div>
-        <button
-          onClick={openCreate}
-          className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white text-sm font-medium
-                     hover:from-brand-700 hover:to-brand-800 active:scale-[0.98] transition-all duration-200 shadow-sm hover:shadow-md"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-          </svg>
-          Add Branch
-        </button>
+        {ALLOW_UI_ADD_BRANCH && (
+          <button
+            onClick={openCreate}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white text-sm font-medium
+                       hover:from-brand-700 hover:to-brand-800 active:scale-[0.98] transition-all duration-200 shadow-sm hover:shadow-md"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+            </svg>
+            Add Branch
+          </button>
+        )}
       </div>
 
       {/* Stats */}
