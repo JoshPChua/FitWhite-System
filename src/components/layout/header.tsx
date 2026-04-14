@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { Badge } from '@/components/ui/badge';
+import { IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
 
 // PH Timezone offset is UTC+8 fixed — no DST
 function getPHTTime() {
@@ -11,6 +12,12 @@ function getPHTTime() {
 
 export function Header() {
   const { profile, branches, selectedBranch, setSelectedBranch, isOwner, signOut } = useAuth();
+
+  // In Imus-only mode, restrict the branch list to the IMS branch.
+  // This is a UI-level guard — RLS enforces the restriction at the DB level.
+  const visibleBranches = IMUS_ONLY
+    ? branches.filter((b) => b.code === IMUS_BRANCH_CODE)
+    : branches;
   const [branchOpen, setBranchOpen] = useState(false);
   const [userOpen, setUserOpen] = useState(false);
   const branchRef = useRef<HTMLDivElement>(null);
@@ -62,7 +69,7 @@ export function Header() {
       {/* Right: Branch selector + User */}
       <div className="flex items-center gap-3">
         {/* Branch Selector (Owner only switches branches) */}
-        {isOwner && branches.length > 0 && (
+        {isOwner && visibleBranches.length > 0 && (
           <div ref={branchRef} className="relative">
             <button
               onClick={() => setBranchOpen(!branchOpen)}
@@ -79,7 +86,7 @@ export function Header() {
 
             {branchOpen && (
               <div className="absolute right-0 top-full mt-1 w-56 bg-white rounded-xl border border-brand-100 shadow-dropdown animate-fade-in z-50 py-1 max-h-80 overflow-y-auto">
-                {branches.map((branch) => (
+                {visibleBranches.map((branch) => (
                   <button
                     key={branch.id}
                     onClick={() => {

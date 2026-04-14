@@ -15,6 +15,21 @@ export type SaleStatus = 'completed' | 'refunded' | 'partial_refund' | 'voided';
 export type AdjustmentType = 'sale' | 'refund' | 'manual_add' | 'manual_remove' | 'initial' | 'bulk_upload';
 export type RefundType = 'product' | 'service' | 'consumed';
 
+// ─── Phase 3 Enums ──────────────────────────────────────────
+
+export type PackageStatus = 'active' | 'completed' | 'expired' | 'cancelled';
+export type ShiftStatus = 'open' | 'closed';
+export type CashMovementType = 'petty_cash_out' | 'bank_deposit' | 'cash_in' | 'opening_float';
+export type InvLogSource =
+  | 'service_bom'
+  | 'addon_manual'
+  | 'sale_product'
+  | 'refund_return'
+  | 'manual_adjust'
+  | 'initial_stock'
+  | 'bulk_upload';
+export type SalePaymentType = 'full' | 'installment' | 'package_use';
+
 // ─── Database type for Supabase client ──────────────────────
 
 export interface Database {
@@ -70,6 +85,9 @@ export interface Database {
           branch_id: string | null;
           is_active: boolean;
           avatar_url: string | null;
+          // Phase 3 additions
+          is_doctor: boolean;
+          default_commission_rate: number | null;
           created_at: string;
           updated_at: string;
         };
@@ -82,6 +100,9 @@ export interface Database {
           branch_id?: string | null;
           is_active?: boolean;
           avatar_url?: string | null;
+          // Phase 3 additions
+          is_doctor?: boolean;
+          default_commission_rate?: number | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -93,6 +114,9 @@ export interface Database {
           branch_id?: string | null;
           is_active?: boolean;
           avatar_url?: string | null;
+          // Phase 3 additions
+          is_doctor?: boolean;
+          default_commission_rate?: number | null;
           updated_at?: string;
         };
       };
@@ -145,6 +169,8 @@ export interface Database {
           duration_minutes: number | null;
           category: string | null;
           is_active: boolean;
+          // Phase 3 addition
+          default_session_count: number;
           created_at: string;
           updated_at: string;
         };
@@ -157,6 +183,8 @@ export interface Database {
           duration_minutes?: number | null;
           category?: string | null;
           is_active?: boolean;
+          // Phase 3 addition
+          default_session_count?: number;
           created_at?: string;
           updated_at?: string;
         };
@@ -168,6 +196,8 @@ export interface Database {
           duration_minutes?: number | null;
           category?: string | null;
           is_active?: boolean;
+          // Phase 3 addition
+          default_session_count?: number;
           updated_at?: string;
         };
       };
@@ -302,6 +332,10 @@ export interface Database {
           total: number;
           status: SaleStatus;
           notes: string | null;
+          // Phase 3 additions
+          shift_id: string | null;
+          attending_doctor_id: string | null;
+          payment_type: SalePaymentType;
           created_at: string;
           updated_at: string;
         };
@@ -317,6 +351,10 @@ export interface Database {
           total: number;
           status?: SaleStatus;
           notes?: string | null;
+          // Phase 3 additions
+          shift_id?: string | null;
+          attending_doctor_id?: string | null;
+          payment_type?: SalePaymentType;
           created_at?: string;
           updated_at?: string;
         };
@@ -331,6 +369,10 @@ export interface Database {
           total?: number;
           status?: SaleStatus;
           notes?: string | null;
+          // Phase 3 additions
+          shift_id?: string | null;
+          attending_doctor_id?: string | null;
+          payment_type?: SalePaymentType;
           updated_at?: string;
         };
       };
@@ -574,6 +616,19 @@ export interface Database {
         Args: { branch_code: string };
         Returns: string;
       };
+      // Phase 3 helpers
+      get_imus_branch_id: {
+        Args: Record<string, never>;
+        Returns: string | null;
+      };
+      is_branch_staff: {
+        Args: { p_branch_id: string };
+        Returns: boolean;
+      };
+      is_manager_or_owner: {
+        Args: Record<string, never>;
+        Returns: boolean;
+      };
     };
     Enums: {
       user_role: UserRole;
@@ -583,7 +638,18 @@ export interface Database {
       sale_status: SaleStatus;
       adjustment_type: AdjustmentType;
       refund_type: RefundType;
+      // Phase 3 enums
+      package_status: PackageStatus;
+      shift_status: ShiftStatus;
+      cash_movement_type: CashMovementType;
+      inv_log_source: InvLogSource;
     };
+
+    // ─── Phase 3 Tables ────────────────────────────────────────
+
+    // Injected into Tables via declaration merging would be ideal,
+    // but for hand-crafted types we add them directly below.
+    // The Tables<T> helper still works for these via the union.
   };
 }
 
@@ -616,6 +682,152 @@ export type StockAdjustment = Tables<'stock_adjustments'>;
 export type TreatmentHistory = Tables<'treatment_history'>;
 export type AuditLog = Tables<'audit_logs'>;
 
+// ─── Phase 3 standalone row types ───────────────────────────
+// These are hand-crafted because the Phase 3 tables are not yet
+// in the generated Supabase types. Use these types wherever you
+// query the Phase 3 tables via the Supabase client.
+
+export interface ServiceConsumable {
+  id: string;
+  service_id: string;
+  product_id: string;
+  quantity: number;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Shift {
+  id: string;
+  branch_id: string;
+  opened_by: string;
+  closed_by: string | null;
+  opening_cash: number;
+  closing_cash: number | null;
+  expected_cash: number | null;
+  variance: number | null; // computed column
+  status: ShiftStatus;
+  notes: string | null;
+  opened_at: string;
+  closed_at: string | null;
+}
+
+export interface CashMovement {
+  id: string;
+  branch_id: string;
+  shift_id: string | null;
+  performed_by: string;
+  movement_type: CashMovementType;
+  amount: number;
+  description: string;
+  reference: string | null;
+  approved_by: string | null;
+  created_at: string;
+}
+
+export interface PatientPackage {
+  id: string;
+  branch_id: string;
+  customer_id: string;
+  sale_item_id: string | null;
+  service_id: string;
+  attending_doctor_id: string | null;
+  total_price: number;
+  downpayment: number;
+  total_paid: number;
+  remaining_balance: number; // computed column
+  total_sessions: number;
+  sessions_used: number;
+  sessions_remaining: number; // computed column
+  status: PackageStatus;
+  notes: string | null;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PackagePayment {
+  id: string;
+  package_id: string;
+  branch_id: string;
+  received_by: string;
+  amount: number;
+  method: PaymentMethod;
+  reference_number: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface PackageSession {
+  id: string;
+  package_id: string;
+  branch_id: string;
+  performed_by: string;
+  doctor_id: string | null;
+  sessions_count: number;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface DoctorCommission {
+  id: string;
+  branch_id: string;
+  doctor_id: string;
+  package_session_id: string | null;
+  sale_item_id: string | null;
+  gross_amount: number;
+  commission_rate: number | null;
+  commission_amount: number;
+  net_branch_amount: number; // computed column
+  is_paid: boolean;
+  paid_at: string | null;
+  override_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InventoryLog {
+  id: string;
+  inventory_id: string;
+  product_id: string;
+  branch_id: string;
+  performed_by: string;
+  source: InvLogSource;
+  quantity_delta: number;
+  quantity_before: number;
+  quantity_after: number;
+  sale_id: string | null;
+  sale_item_id: string | null;
+  package_session_id: string | null;
+  shift_id: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+// Insert helpers for Phase 3 tables
+
+export type InsertServiceConsumable = Omit<ServiceConsumable, 'id' | 'created_at' | 'updated_at'> & {
+  id?: string;
+};
+export type InsertShift = Omit<Shift, 'id' | 'variance' | 'opened_at'> & {
+  id?: string;
+  opened_at?: string;
+};
+export type InsertCashMovement = Omit<CashMovement, 'id' | 'created_at'> & {
+  id?: string;
+};
+export type InsertPatientPackage = Omit<
+  PatientPackage,
+  'id' | 'total_paid' | 'remaining_balance' | 'sessions_used' | 'sessions_remaining' | 'created_at' | 'updated_at'
+> & { id?: string };
+export type InsertPackagePayment = Omit<PackagePayment, 'id' | 'created_at'> & { id?: string };
+export type InsertPackageSession = Omit<PackageSession, 'id' | 'created_at'> & { id?: string };
+export type InsertDoctorCommission = Omit<
+  DoctorCommission,
+  'id' | 'net_branch_amount' | 'created_at' | 'updated_at'
+> & { id?: string };
+export type InsertInventoryLog = Omit<InventoryLog, 'id' | 'created_at'> & { id?: string };
+
 // ─── Auth context type (used throughout the app) ────────────
 
 export interface AuthUser {
@@ -623,3 +835,4 @@ export interface AuthUser {
   email: string;
   profile: Profile;
 }
+

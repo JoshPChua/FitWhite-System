@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/providers/auth-provider';
+import { IMUS_ONLY } from '@/lib/feature-flags';
 
 const ownerNav = [
   { href: '/dashboard', label: 'Dashboard', icon: DashboardIcon },
@@ -44,7 +45,14 @@ export function Sidebar() {
   const pathname = usePathname();
   const { profile, isOwner, isManager } = useAuth();
 
-  const navItems = isOwner ? ownerNav : isManager ? managerNav : cashierNav;
+  // In Imus-only mode, hide the Branches management link — there is only one
+  // branch and showing branch management UI makes no sense in single-branch mode.
+  const filterNav = (items: typeof ownerNav) =>
+    IMUS_ONLY ? items.filter((item) => item.href !== '/branches') : items;
+
+  const navItems = filterNav(
+    isOwner ? ownerNav : isManager ? managerNav : cashierNav,
+  );
 
   return (
     <aside className="fixed left-0 top-0 h-screen w-64 bg-white border-r border-brand-100/80 shadow-sidebar flex flex-col z-40">
