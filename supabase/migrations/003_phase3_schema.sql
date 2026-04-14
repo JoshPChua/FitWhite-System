@@ -5,21 +5,22 @@
 -- ADDITIVE ONLY — no existing tables are dropped or altered
 -- destructively. Safe to run on a live Supabase project.
 --
--- New additions:
---   ENUMs: package_status, shift_status, cash_movement_type,
---          inv_log_source
---   COLUMNS: services.default_session_count
---            profiles.is_doctor, profiles.default_commission_rate
---            sales.shift_id, sales.attending_doctor_id,
---            sales.payment_type
---   TABLES: service_consumables, patient_packages,
---           package_payments, package_sessions,
---           doctor_commissions, shifts, cash_movements,
---           inventory_logs
---   TRIGGERS: sync_package_total_paid,
---             sync_package_sessions_used,
---             guard_package_overpayment,
---             guard_commission_amount
+-- Execution order (dependency-safe):
+--   1. ENUMs
+--   2. ALTER services, profiles  (no new-table deps)
+--   3. CREATE shifts              (needed by sales.shift_id)
+--   4. ALTER sales                (references shifts, profiles)
+--   5. CREATE service_consumables (references services, products)
+--   6. CREATE cash_movements      (references shifts)
+--   7. CREATE patient_packages    (references services, customers)
+--   8. CREATE package_payments    (references patient_packages)
+--      + trigger sync_package_total_paid (overpayment guard)
+--   9. CREATE package_sessions    (references patient_packages)
+--      + trigger sync_package_sessions_used (over-use guard)
+--  10. CREATE doctor_commissions  (references package_sessions)
+--      + trigger guard_commission_amount
+--  11. CREATE inventory_logs      (references all above)
+--  12. ALTER PUBLICATION
 -- ============================================================
 
 -- ─── ENUMS ──────────────────────────────────────────────────
@@ -57,7 +58,7 @@ CREATE TYPE inv_log_source AS ENUM (
 --   (set_updated_at function is reused below via CREATE TRIGGER)
 
 -- ============================================================
--- ALTER: services — add default session count
+-- 2. ALTER: services — add default session count
 -- ============================================================
 
 ALTER TABLE services
@@ -70,7 +71,7 @@ COMMENT ON COLUMN services.default_session_count IS
    >1 = package service (e.g. 10-session program).';
 
 -- ============================================================
--- ALTER: profiles — doctor flag & default commission rate
+-- 2. ALTER: profiles — doctor flag & default commission rate
 -- ============================================================
 
 ALTER TABLE profiles
@@ -89,57 +90,7 @@ COMMENT ON COLUMN profiles.default_commission_rate IS
    Cap enforced: 0–1 inclusive.';
 
 -- ============================================================
--- ALTER: sales — link to shift & attending doctor
--- ============================================================
-
-ALTER TABLE sales
-  ADD COLUMN IF NOT EXISTS shift_id             UUID
-    REFERENCES shifts(id) ON DELETE SET NULL,
-  ADD COLUMN IF NOT EXISTS attending_doctor_id  UUID
-    REFERENCES profiles(id) ON DELETE SET NULL,
-  ADD COLUMN IF NOT EXISTS payment_type         VARCHAR(20)
-    NOT NULL DEFAULT 'full'
-    CHECK (payment_type IN ('full', 'installment', 'package_use'));
-
-COMMENT ON COLUMN sales.payment_type IS
-  'full        = paid in full at time of sale
-   installment = downpayment taken; balance tracked in patient_packages
-   package_use = session deducted from an existing patient_package';
-
--- ============================================================
--- SERVICE CONSUMABLES (BOM)
--- ============================================================
--- Links inventory products to services as required consumables.
--- On each service execution, all linked products are deducted
--- from inventory atomically by the API / checkout function.
--- ============================================================
-
-CREATE TABLE service_consumables (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  service_id  UUID NOT NULL REFERENCES services(id)  ON DELETE CASCADE,
-  product_id  UUID NOT NULL REFERENCES products(id)  ON DELETE RESTRICT,
-  quantity    INT  NOT NULL DEFAULT 1                 CHECK (quantity > 0),
-  notes       TEXT,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-  -- One product can only appear once per service BOM
-  UNIQUE(service_id, product_id)
-);
-
-CREATE INDEX idx_svc_consumables_service ON service_consumables(service_id);
-CREATE INDEX idx_svc_consumables_product ON service_consumables(product_id);
-
-CREATE TRIGGER service_consumables_updated_at
-  BEFORE UPDATE ON service_consumables
-  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-COMMENT ON TABLE service_consumables IS
-  'Bill of Materials: inventory products automatically consumed
-   when a service is performed. Deducted atomically at checkout.';
-
--- ============================================================
--- SHIFTS (Cash Drawer)
+-- 3. CREATE: shifts (must come BEFORE ALTER TABLE sales)
 -- ============================================================
 -- One shift = one cashier/manager session at the drawer.
 -- Only one shift may be OPEN per branch at a time.
@@ -188,7 +139,58 @@ COMMENT ON TABLE shifts IS
    opening a new one.';
 
 -- ============================================================
--- CASH MOVEMENTS (Petty Cash / Bank Deposits)
+-- 4. ALTER: sales — link to shift & attending doctor
+--    (must come AFTER CREATE TABLE shifts)
+-- ============================================================
+
+ALTER TABLE sales
+  ADD COLUMN IF NOT EXISTS shift_id             UUID
+    REFERENCES shifts(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS attending_doctor_id  UUID
+    REFERENCES profiles(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS payment_type         VARCHAR(20)
+    NOT NULL DEFAULT 'full'
+    CHECK (payment_type IN ('full', 'installment', 'package_use'));
+
+COMMENT ON COLUMN sales.payment_type IS
+  'full        = paid in full at time of sale
+   installment = downpayment taken; balance tracked in patient_packages
+   package_use = session deducted from an existing patient_package';
+
+-- ============================================================
+-- 5. SERVICE CONSUMABLES (BOM)
+-- ============================================================
+-- Links inventory products to services as required consumables.
+-- On each service execution, all linked products are deducted
+-- from inventory atomically by the API / checkout function.
+-- ============================================================
+
+CREATE TABLE service_consumables (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_id  UUID NOT NULL REFERENCES services(id)  ON DELETE CASCADE,
+  product_id  UUID NOT NULL REFERENCES products(id)  ON DELETE RESTRICT,
+  quantity    INT  NOT NULL DEFAULT 1                 CHECK (quantity > 0),
+  notes       TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- One product can only appear once per service BOM
+  UNIQUE(service_id, product_id)
+);
+
+CREATE INDEX idx_svc_consumables_service ON service_consumables(service_id);
+CREATE INDEX idx_svc_consumables_product ON service_consumables(product_id);
+
+CREATE TRIGGER service_consumables_updated_at
+  BEFORE UPDATE ON service_consumables
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+COMMENT ON TABLE service_consumables IS
+  'Bill of Materials: inventory products automatically consumed
+   when a service is performed. Deducted atomically at checkout.';
+
+-- ============================================================
+-- 6. CASH MOVEMENTS (Petty Cash / Bank Deposit Ledger)
 -- ============================================================
 -- Append-only ledger of all money moving in/out of the drawer
 -- outside of normal sales. No UPDATE or DELETE allowed (see RLS).
@@ -218,7 +220,7 @@ COMMENT ON TABLE cash_movements IS
    the drawer outside of a sale is recorded here. No edits permitted.';
 
 -- ============================================================
--- PATIENT PACKAGES (Session Tracking + A/R)
+-- 7. PATIENT PACKAGES (Session Tracking + A/R)
 -- ============================================================
 -- One row per package purchased by a customer.
 -- total_paid and sessions_used are maintained by triggers
@@ -287,7 +289,7 @@ COMMENT ON TABLE patient_packages IS
    remaining_balance and sessions_remaining are computed — never edited directly.';
 
 -- ============================================================
--- PACKAGE PAYMENTS (A/R Payment Ledger)
+-- 8. PACKAGE PAYMENTS (A/R Payment Ledger)
 -- ============================================================
 -- Append-only. Each row = one installment / payment event.
 -- A trigger keeps patient_packages.total_paid in sync.
@@ -321,10 +323,10 @@ COMMENT ON TABLE package_payments IS
 CREATE OR REPLACE FUNCTION sync_package_total_paid()
 RETURNS TRIGGER AS $$
 DECLARE
-  v_total_price   DECIMAL(10,2);
+  v_total_price    DECIMAL(10,2);
   v_new_total_paid DECIMAL(10,2);
 BEGIN
-  -- Sum all payments for this package
+  -- Sum all payments for this package (including the new row)
   SELECT COALESCE(SUM(amount), 0)
   INTO v_new_total_paid
   FROM package_payments
@@ -337,7 +339,7 @@ BEGIN
 
   IF v_new_total_paid > v_total_price THEN
     RAISE EXCEPTION
-      'Payment rejected: total payments (₱%) would exceed package total price (₱%) for package %',
+      'Payment rejected: total payments (%) would exceed package total price (%) for package %',
       v_new_total_paid, v_total_price, NEW.package_id
       USING ERRCODE = 'check_violation';
   END IF;
@@ -361,7 +363,7 @@ COMMENT ON FUNCTION sync_package_total_paid() IS
    this is the primary DB-level over-payment guard.';
 
 -- ============================================================
--- PACKAGE SESSIONS (Per-visit session consumption log)
+-- 9. PACKAGE SESSIONS (Per-visit session consumption log)
 -- ============================================================
 -- Append-only. Each row = one treatment visit that deducts
 -- sessions from the package. A trigger keeps sessions_used in sync.
@@ -395,7 +397,7 @@ COMMENT ON TABLE package_sessions IS
 CREATE OR REPLACE FUNCTION sync_package_sessions_used()
 RETURNS TRIGGER AS $$
 DECLARE
-  v_total_sessions  INT;
+  v_total_sessions    INT;
   v_new_sessions_used INT;
 BEGIN
   -- Sum all sessions used for this package
@@ -434,7 +436,7 @@ COMMENT ON FUNCTION sync_package_sessions_used() IS
    Raises check_violation if sessions_used would exceed total_sessions.';
 
 -- ============================================================
--- DOCTOR COMMISSIONS
+-- 10. DOCTOR COMMISSIONS
 -- ============================================================
 -- Tracks the commission owed to a doctor per service session or sale.
 -- Either commission_rate or commission_amount can be overridden by the POS.
@@ -488,16 +490,17 @@ COMMENT ON TABLE doctor_commissions IS
    Either can be overridden by the POS (requires override_reason).
    net_branch_amount is the remainder after commission — computed column.';
 
--- ── Trigger: validate commission amount against gross ────────
--- Secondary guard (belt-and-suspenders on top of the CHECK constraint).
--- Also enforces that override_reason is present when the commission
--- deviates from profiles.default_commission_rate by more than 5%.
+-- ── Trigger: validate commission amount ──────────────────────
+-- Enforces:
+--   1. The referenced profile must have is_doctor = TRUE.
+--   2. commission_amount must not exceed gross_amount.
+--   3. If effective rate deviates > 5% from default, override_reason is required.
 
 CREATE OR REPLACE FUNCTION guard_commission_amount()
 RETURNS TRIGGER AS $$
 DECLARE
-  v_default_rate     DECIMAL(5,4);
-  v_effective_rate   DECIMAL(5,4);
+  v_default_rate   DECIMAL(5,4);
+  v_effective_rate DECIMAL(5,4);
 BEGIN
   -- Ensure doctor has is_doctor = TRUE
   IF NOT EXISTS (
@@ -512,7 +515,7 @@ BEGIN
   -- If commission_amount > gross_amount, reject hard
   IF NEW.commission_amount > NEW.gross_amount THEN
     RAISE EXCEPTION
-      'Commission rejected: commission_amount (₱%) exceeds gross_amount (₱%)',
+      'Commission rejected: commission_amount (%) exceeds gross_amount (%)',
       NEW.commission_amount, NEW.gross_amount
       USING ERRCODE = 'check_violation';
   END IF;
@@ -535,7 +538,7 @@ BEGIN
      AND (NEW.override_reason IS NULL OR TRIM(NEW.override_reason) = '')
   THEN
     RAISE EXCEPTION
-      'Commission override requires override_reason: effective rate (%) deviates > 5%% from default rate (%) for doctor %',
+      'Commission override requires override_reason: effective rate (%) deviates >5%% from default rate (%) for doctor %',
       v_effective_rate, v_default_rate, NEW.doctor_id
       USING ERRCODE = 'not_null_violation';
   END IF;
@@ -556,7 +559,7 @@ COMMENT ON FUNCTION guard_commission_amount() IS
       the doctor''s default_commission_rate.';
 
 -- ============================================================
--- INVENTORY LOGS (Canonical Source-Aware Stock Log)
+-- 11. INVENTORY LOGS (Canonical Source-Aware Stock Log)
 -- ============================================================
 -- Replaces the thin stock_adjustments table as the canonical
 -- inventory event log. stock_adjustments is NOT dropped for
@@ -609,7 +612,7 @@ COMMENT ON TABLE inventory_logs IS
    No UPDATE or DELETE is permitted (enforced via RLS in 004_phase3_rls.sql).';
 
 -- ============================================================
--- REALTIME: add new key tables to Supabase realtime publication
+-- 12. REALTIME: add new key tables to Supabase realtime publication
 -- ============================================================
 
 ALTER PUBLICATION supabase_realtime ADD TABLE patient_packages;
