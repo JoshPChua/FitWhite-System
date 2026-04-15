@@ -3,7 +3,12 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/providers/auth-provider';
-import { IMUS_ONLY } from '@/lib/feature-flags';
+import {
+  IMUS_ONLY,
+  ENABLE_PATIENT_PACKAGES,
+  ENABLE_SHIFTS,
+  ENABLE_DOCTOR_COMMISSIONS,
+} from '@/lib/feature-flags';
 
 const ownerNav = [
   { href: '/dashboard', label: 'Dashboard', icon: DashboardIcon },
@@ -14,6 +19,9 @@ const ownerNav = [
   { href: '/bundles', label: 'Bundles', icon: BundlesIcon },
   { href: '/customers', label: 'Customers', icon: CustomersIcon },
   { href: '/sales', label: 'Sales', icon: SalesIcon },
+  ...(ENABLE_PATIENT_PACKAGES ? [{ href: '/packages', label: 'Packages', icon: PackagesIcon }] : []),
+  ...(ENABLE_SHIFTS ? [{ href: '/shifts', label: 'Shifts', icon: ShiftsIcon }] : []),
+  ...(ENABLE_DOCTOR_COMMISSIONS ? [{ href: '/commissions', label: 'Commissions', icon: CommissionsIcon }] : []),
   { href: '/reports', label: 'Reports', icon: ReportsIcon },
   { href: '/users', label: 'Users', icon: UsersIcon },
   { href: '/branches', label: 'Branches', icon: BranchIcon },
@@ -29,6 +37,9 @@ const managerNav = [
   { href: '/bundles', label: 'Bundles', icon: BundlesIcon },
   { href: '/customers', label: 'Customers', icon: CustomersIcon },
   { href: '/sales', label: 'Sales', icon: SalesIcon },
+  ...(ENABLE_PATIENT_PACKAGES ? [{ href: '/packages', label: 'Packages', icon: PackagesIcon }] : []),
+  ...(ENABLE_SHIFTS ? [{ href: '/shifts', label: 'Shifts', icon: ShiftsIcon }] : []),
+  ...(ENABLE_DOCTOR_COMMISSIONS ? [{ href: '/commissions', label: 'Commissions', icon: CommissionsIcon }] : []),
   { href: '/reports', label: 'Reports', icon: ReportsIcon },
   { href: '/users', label: 'Staff', icon: UsersIcon },
   { href: '/audit-logs', label: 'Audit Logs', icon: AuditIcon },
@@ -39,6 +50,7 @@ const cashierNav = [
   { href: '/customers', label: 'Customers', icon: CustomersIcon },
   { href: '/services', label: 'Services', icon: ServicesIcon },
   { href: '/products', label: 'Products', icon: ProductsIcon },
+  ...(ENABLE_PATIENT_PACKAGES ? [{ href: '/packages', label: 'Packages', icon: PackagesIcon }] : []),
 ];
 
 export function Sidebar() {
@@ -211,6 +223,30 @@ function BranchIcon({ className = '' }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 21v-7.5a.75.75 0 01.75-.75h3a.75.75 0 01.75.75V21m-4.5 0H2.36m11.14 0H18m0 0h3.64m-1.39 0V9.349m-16.5 11.65V9.35m0 0a3.001 3.001 0 003.75-.615A2.993 2.993 0 009.75 9.75c.896 0 1.7-.393 2.25-1.016a2.993 2.993 0 002.25 1.016c.896 0 1.7-.393 2.25-1.016a3.001 3.001 0 003.75.614m-16.5 0a3.004 3.004 0 01-.621-4.72L4.318 3.44A1.5 1.5 0 015.378 3h13.243a1.5 1.5 0 011.06.44l1.19 1.189a3 3 0 01-.621 4.72m-13.5 8.65h3.75a.75.75 0 00.75-.75V13.5a.75.75 0 00-.75-.75H6.75a.75.75 0 00-.75.75v3.75c0 .415.336.75.75.75z" />
+    </svg>
+  );
+}
+
+function PackagesIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+    </svg>
+  );
+}
+
+function ShiftsIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  );
+}
+
+function CommissionsIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
     </svg>
   );
 }

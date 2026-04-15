@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ENABLE_SERVICE_BOM } from '@/lib/feature-flags';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -21,6 +22,21 @@ interface Service {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  bom_count?: number;
+}
+
+interface BomEntry {
+  id: string;
+  product_id: string;
+  product_name: string;
+  quantity: number;
+  notes: string | null;
+}
+
+interface BranchProduct {
+  id: string;
+  name: string;
+  sku: string | null;
 }
 
 interface ServiceFormData {
@@ -72,6 +88,16 @@ export default function ServicesPage() {
   // Delete
   const [deleteTarget, setDeleteTarget] = useState<Service | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // BOM Management
+  const [bomService, setBomService] = useState<Service | null>(null);
+  const [bomEntries, setBomEntries] = useState<BomEntry[]>([]);
+  const [bomLoading, setBomLoading] = useState(false);
+  const [branchProducts, setBranchProducts] = useState<BranchProduct[]>([]);
+  const [bomAddProduct, setBomAddProduct] = useState('');
+  const [bomAddQty, setBomAddQty] = useState('1');
+  const [bomSubmitting, setBomSubmitting] = useState(false);
+  const [bomCounts, setBomCounts] = useState<Map<string, number>>(new Map());
 
   const supabase = createClient();
 
@@ -249,6 +275,92 @@ export default function ServicesPage() {
     }
   };
 
+  // ─── BOM Handlers ──────────────────────────────────────
+
+  const fetchBomEntries = async (serviceId: string) => {
+    setBomLoading(true);
+    try {
+      const res = await fetch(`/api/service-consumables?service_id=${serviceId}`);
+      const result = await res.json();
+      if (res.ok) {
+        setBomEntries((result.data || []).map((e: Record<string, unknown>) => ({
+          id: e.id as string,
+          product_id: e.product_id as string,
+          product_name: e.products ? (e.products as Record<string, unknown>).name as string : 'Unknown',
+          quantity: Number(e.quantity),
+          notes: e.notes as string | null,
+        })));
+      }
+    } catch (err) { console.error('BOM fetch error:', err); }
+    finally { setBomLoading(false); }
+  };
+
+  const fetchBomCounts = useCallback(async () => {
+    if (!ENABLE_SERVICE_BOM) return;
+    const counts = new Map<string, number>();
+    for (const svc of services) {
+      try {
+        const res = await fetch(`/api/service-consumables?service_id=${svc.id}`);
+        const result = await res.json();
+        if (res.ok) counts.set(svc.id, (result.data || []).length);
+      } catch { counts.set(svc.id, 0); }
+    }
+    setBomCounts(counts);
+  }, [services]);
+
+  useEffect(() => { fetchBomCounts(); }, [fetchBomCounts]);
+
+  const openBom = async (s: Service) => {
+    setBomService(s);
+    setBomAddProduct('');
+    setBomAddQty('1');
+    await fetchBomEntries(s.id);
+    // Fetch branch products for the add dropdown
+    const { data: prods } = await supabase
+      .from('products')
+      .select('id, name, sku')
+      .eq('branch_id', s.branch_id)
+      .eq('is_active', true)
+      .order('name');
+    setBranchProducts((prods || []) as BranchProduct[]);
+  };
+
+  const handleAddBom = async () => {
+    if (!bomService || !bomAddProduct) return;
+    setBomSubmitting(true);
+    try {
+      const res = await fetch('/api/service-consumables', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          service_id: bomService.id,
+          product_id: bomAddProduct,
+          quantity: parseInt(bomAddQty) || 1,
+        }),
+      });
+      if (res.ok) {
+        await fetchBomEntries(bomService.id);
+        setBomAddProduct('');
+        setBomAddQty('1');
+        fetchBomCounts();
+      } else {
+        const r = await res.json();
+        alert(r.error || 'Failed to add consumable');
+      }
+    } catch (err) { console.error(err); }
+    finally { setBomSubmitting(false); }
+  };
+
+  const handleRemoveBom = async (entryId: string) => {
+    try {
+      const res = await fetch(`/api/service-consumables/${entryId}`, { method: 'DELETE' });
+      if (res.ok && bomService) {
+        await fetchBomEntries(bomService.id);
+        fetchBomCounts();
+      }
+    } catch (err) { console.error(err); }
+  };
+
   const formatCurrency = (n: number) =>
     new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(n);
 
@@ -411,6 +523,22 @@ export default function ServicesPage() {
                     {canManage && (
                       <td className="px-5 py-4">
                         <div className="flex items-center justify-end gap-1">
+                          {ENABLE_SERVICE_BOM && (
+                            <button
+                              onClick={() => openBom(s)}
+                              className="p-2 rounded-lg text-brand-400 hover:text-brand-700 hover:bg-brand-50 transition-colors"
+                              title="Manage consumables (BOM)"
+                            >
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5" />
+                              </svg>
+                              {(bomCounts.get(s.id) || 0) > 0 && (
+                                <span className="absolute -top-1 -right-1 bg-brand-500 text-white text-[9px] w-4 h-4 rounded-full flex items-center justify-center">
+                                  {bomCounts.get(s.id)}
+                                </span>
+                              )}
+                            </button>
+                          )}
                           <button
                             onClick={() => openEdit(s)}
                             className="p-2 rounded-lg text-brand-400 hover:text-brand-700 hover:bg-brand-50 transition-colors"
@@ -630,6 +758,76 @@ export default function ServicesPage() {
             </button>
           </div>
         </div>
+      </Modal>
+
+      {/* ─── BOM Management Modal ──────────────────────────────── */}
+      <Modal
+        isOpen={!!bomService}
+        onClose={() => { setBomService(null); setBomEntries([]); }}
+        title="Service Consumables (BOM)"
+        subtitle={bomService ? `${bomService.name}` : ''}
+        size="md"
+      >
+        {bomService && (
+          <div className="space-y-4">
+            <p className="text-xs text-brand-400">
+              Define which inventory products are consumed each time this service is performed. These items will be auto-deducted from inventory at checkout.
+            </p>
+
+            {/* Current BOM entries */}
+            {bomLoading ? (
+              <div className="space-y-2">{Array.from({ length: 2 }).map((_, i) => <Skeleton key={i} className="h-12 w-full rounded-xl" />)}</div>
+            ) : bomEntries.length === 0 ? (
+              <div className="bg-surface-50 rounded-xl p-4 text-center text-sm text-brand-400">
+                No consumables linked to this service yet
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {bomEntries.map(entry => (
+                  <div key={entry.id} className="flex items-center justify-between bg-surface-50 rounded-xl px-4 py-3">
+                    <div>
+                      <p className="text-sm font-medium text-brand-800">{entry.product_name}</p>
+                      <p className="text-xs text-brand-400">Qty per service: {entry.quantity}</p>
+                    </div>
+                    <button onClick={() => handleRemoveBom(entry.id)}
+                      className="p-1.5 rounded-lg text-rose-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                      title="Remove">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Add new BOM entry */}
+            {canManage && (
+              <div className="border-t border-brand-100 pt-4">
+                <p className="text-xs font-semibold text-brand-500 uppercase mb-2">Add Consumable</p>
+                <div className="flex gap-2">
+                  <select value={bomAddProduct} onChange={e => setBomAddProduct(e.target.value)}
+                    className="flex-1 px-3 py-2 rounded-xl border border-brand-200 bg-surface-50 text-sm text-brand-900
+                               focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all">
+                    <option value="">Select product...</option>
+                    {branchProducts
+                      .filter(p => !bomEntries.some(e => e.product_id === p.id))
+                      .map(p => <option key={p.id} value={p.id}>{p.name}{p.sku ? ` (${p.sku})` : ''}</option>)}
+                  </select>
+                  <input type="number" value={bomAddQty} min="1" onChange={e => setBomAddQty(e.target.value)}
+                    className="w-20 px-3 py-2 rounded-xl border border-brand-200 bg-surface-50 text-sm text-brand-900 text-center
+                               focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all"
+                    placeholder="Qty" />
+                  <button onClick={handleAddBom} disabled={!bomAddProduct || bomSubmitting}
+                    className="px-4 py-2 rounded-xl bg-brand-600 text-white text-sm font-medium
+                               hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                    {bomSubmitting ? '...' : 'Add'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Modal>
     </div>
   );
