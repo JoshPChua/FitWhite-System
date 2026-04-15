@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { StatCard } from '@/components/ui/stat-card';
 import { Badge } from '@/components/ui/badge';
 import { StatCardSkeleton } from '@/components/ui/skeleton';
+import { ENABLE_PATIENT_PACKAGES, ENABLE_DOCTOR_COMMISSIONS } from '@/lib/feature-flags';
 
 interface DashboardStats {
   totalRevenue: number;
@@ -49,6 +50,8 @@ export default function DashboardPage() {
   const [recentSales, setRecentSales] = useState<RecentSale[]>([]);
   const [lowStock, setLowStock] = useState<LowStockItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [outstandingAR, setOutstandingAR] = useState(0);
+  const [unpaidCommissions, setUnpaidCommissions] = useState(0);
 
   const supabase = createClient();
 
@@ -167,6 +170,25 @@ export default function DashboardPage() {
             : '',
         }))
       );
+      // Phase 4: Fetch A/R (outstanding package balances)
+      if (ENABLE_PATIENT_PACKAGES) {
+        const arQuery = branchFilter
+          ? supabase.from('patient_packages').select('remaining_balance').eq('status', 'active').eq('branch_id', branchFilter)
+          : supabase.from('patient_packages').select('remaining_balance').eq('status', 'active');
+        const { data: arData } = await arQuery;
+        const totalAR = (arData || []).reduce((sum: number, p: Record<string, unknown>) => sum + Number(p.remaining_balance || 0), 0);
+        setOutstandingAR(totalAR);
+      }
+
+      // Phase 4: Fetch unpaid commissions
+      if (ENABLE_DOCTOR_COMMISSIONS) {
+        const commQuery = branchFilter
+          ? supabase.from('doctor_commissions').select('commission_amount').eq('is_paid', false).eq('branch_id', branchFilter)
+          : supabase.from('doctor_commissions').select('commission_amount').eq('is_paid', false);
+        const { data: commData } = await commQuery;
+        const totalComm = (commData || []).reduce((sum: number, c: Record<string, unknown>) => sum + Number(c.commission_amount || 0), 0);
+        setUnpaidCommissions(totalComm);
+      }
     } catch (error) {
       console.error('Dashboard fetch error:', error);
     } finally {
@@ -274,7 +296,7 @@ export default function DashboardPage() {
             />
           </div>
 
-          {/* Second row: Refunds + additional */}
+          {/* Second row: Refunds + Phase 4 KPIs */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard
               title="Gross Revenue"
@@ -288,6 +310,32 @@ export default function DashboardPage() {
               subtitle="Processed refunds"
               variant={stats.totalRefunds > 0 ? 'warning' : 'default'}
             />
+            {ENABLE_PATIENT_PACKAGES && (
+              <StatCard
+                title="Outstanding A/R"
+                value={formatCurrency(outstandingAR)}
+                subtitle="Active package balances"
+                variant={outstandingAR > 0 ? 'warning' : 'success'}
+                icon={
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0l-3-3m3 3l3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+                  </svg>
+                }
+              />
+            )}
+            {ENABLE_DOCTOR_COMMISSIONS && (
+              <StatCard
+                title="Unpaid Commissions"
+                value={formatCurrency(unpaidCommissions)}
+                subtitle="Due to doctors"
+                variant={unpaidCommissions > 0 ? 'danger' : 'default'}
+                icon={
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                }
+              />
+            )}
           </div>
         </>
       )}

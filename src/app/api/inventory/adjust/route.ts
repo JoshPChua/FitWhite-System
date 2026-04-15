@@ -100,7 +100,7 @@ export async function POST(request: NextRequest) {
       inventoryId = (newInventory as { id: string }).id;
     }
 
-    // Record stock adjustment
+    // Record stock adjustment (legacy — backward compat)
     const { error: adjError } = await adminClient.from('stock_adjustments').insert({
       inventory_id: inventoryId,
       branch_id,
@@ -111,6 +111,27 @@ export async function POST(request: NextRequest) {
     });
 
     if (adjError) console.error('Stock adjustment log error:', adjError);
+
+    // Dual-write to inventory_logs (new canonical log)
+    const sourceMap: Record<string, string> = {
+      manual_add: 'manual_adjust',
+      manual_remove: 'manual_adjust',
+      initial: 'manual_adjust',
+      bulk_upload: 'manual_adjust',
+    };
+    await adminClient.from('inventory_logs').insert({
+      inventory_id: inventoryId,
+      product_id,
+      branch_id,
+      performed_by: currentUser.id,
+      source: sourceMap[adjustment_type] || 'manual_adjust',
+      quantity_delta: quantity_change,
+      quantity_before: currentQty,
+      quantity_after: newQty,
+      notes: reason || `${adjustment_type.replace('_', ' ')}`,
+    } as Record<string, unknown>).then(({ error: logErr }) => {
+      if (logErr) console.error('inventory_logs write error:', logErr);
+    });
 
     // Fetch product name for audit log
     const { data: product } = await adminClient

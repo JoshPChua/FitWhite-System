@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
+import { ENABLE_DOCTOR_COMMISSIONS } from '@/lib/feature-flags';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -54,6 +55,15 @@ interface CompletedSale {
   items: CartLine[];
   payments: Array<{ method: PaymentMethod; amount: number; change_amount?: number; reference_number?: string | null }>;
   timestamp: string;
+  payment_type: 'full' | 'installment';
+  packages_created: Array<{ id: string; service_name: string; total_sessions: number }>;
+  balance_remaining: number;
+}
+
+interface Doctor {
+  id: string;
+  first_name: string;
+  last_name: string;
 }
 
 const PAYMENT_LABELS: Record<PaymentMethod, string> = {
@@ -103,6 +113,11 @@ export default function POSPage() {
   // Receipt modal
   const [completedSale, setCompletedSale] = useState<CompletedSale | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
+
+  // Phase 4: Doctor & Payment Type
+  const [doctors, setDoctors] = useState<Doctor[]>([]);
+  const [attendingDoctorId, setAttendingDoctorId] = useState<string>('');
+  const [paymentType, setPaymentType] = useState<'full' | 'installment'>('full');
 
   // ─── Fetch Catalog ────────────────────────────────────────
 
@@ -207,6 +222,21 @@ export default function POSPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customerSearch, posBranch?.id]);
 
+  // ─── Fetch Doctors (for commission tracking) ──────────────
+
+  useEffect(() => {
+    if (!ENABLE_DOCTOR_COMMISSIONS) return;
+    const fetchDoctors = async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('id, first_name, last_name')
+        .eq('is_doctor', true)
+        .eq('is_active', true);
+      setDoctors((data || []) as Doctor[]);
+    };
+    fetchDoctors();
+  }, [supabase]);
+
   // ─── Cart ─────────────────────────────────────────────────
 
   const addToCart = (item: CatalogItem) => {
@@ -302,8 +332,13 @@ export default function POSPage() {
   const handleCheckout = async () => {
     setPaymentError('');
     if (!posBranch?.id) { setPaymentError('No branch selected'); return; }
-    if (totalPaid < total - 0.01) {
+    // For installment sales, allow partial payment
+    if (paymentType === 'full' && totalPaid < total - 0.01) {
       setPaymentError(`Payment insufficient. Amount due: ₱${amountDue.toFixed(2)}`);
+      return;
+    }
+    if (paymentType === 'installment' && !customer) {
+      setPaymentError('Customer is required for installment/package sales');
       return;
     }
 
@@ -337,6 +372,8 @@ export default function POSPage() {
           discount: discountAmount,
           tax: 0,
           notes: notes || null,
+          attending_doctor_id: attendingDoctorId || null,
+          payment_type: paymentType,
         }),
       });
 
@@ -360,6 +397,9 @@ export default function POSPage() {
           month: 'long', day: 'numeric', year: 'numeric',
           hour: '2-digit', minute: '2-digit',
         }),
+        payment_type: paymentType,
+        packages_created: data.packages_created || [],
+        balance_remaining: paymentType === 'installment' ? total - totalPaid : 0,
       };
       setCompletedSale(completed);
       setShowPaymentModal(false);
@@ -367,6 +407,8 @@ export default function POSPage() {
 
       // Reset POS
       clearCart();
+      setAttendingDoctorId('');
+      setPaymentType('full');
     } catch {
       setPaymentError('Network error — please try again');
     } finally {
@@ -621,6 +663,43 @@ export default function POSPage() {
             </div>
           )}
         </div>
+
+        {/* Doctor & Payment Type (Phase 4) */}
+        {(ENABLE_DOCTOR_COMMISSIONS || cart.some(l => l.item_type === 'service')) && (
+          <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-4 py-3 flex-shrink-0 space-y-2">
+            {/* Attending Doctor */}
+            {ENABLE_DOCTOR_COMMISSIONS && doctors.length > 0 && (
+              <div>
+                <label className="block text-[10px] font-semibold text-brand-400 uppercase tracking-wide mb-1">Attending Doctor</label>
+                <select value={attendingDoctorId} onChange={e => setAttendingDoctorId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-brand-200 bg-surface-50 text-sm text-brand-900
+                             focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all">
+                  <option value="">No doctor</option>
+                  {doctors.map(d => <option key={d.id} value={d.id}>Dr. {d.first_name} {d.last_name}</option>)}
+                </select>
+              </div>
+            )}
+            {/* Payment Type */}
+            {cart.some(l => l.item_type === 'service') && customer && (
+              <div>
+                <label className="block text-[10px] font-semibold text-brand-400 uppercase tracking-wide mb-1">Payment Type</label>
+                <div className="flex rounded-xl border border-brand-200 overflow-hidden">
+                  <button onClick={() => setPaymentType('full')}
+                    className={`flex-1 py-2 text-xs font-medium transition-colors ${paymentType === 'full' ? 'bg-brand-600 text-white' : 'text-brand-500 hover:bg-brand-50'}`}>
+                    Full Payment
+                  </button>
+                  <button onClick={() => setPaymentType('installment')}
+                    className={`flex-1 py-2 text-xs font-medium transition-colors ${paymentType === 'installment' ? 'bg-amber-600 text-white' : 'text-brand-500 hover:bg-brand-50'}`}>
+                    📦 Installment
+                  </button>
+                </div>
+                {paymentType === 'installment' && (
+                  <p className="text-[10px] text-amber-600 mt-1">Partial payment accepted — a package will be created for multi-session services</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Cart Lines */}
         <div className="flex-1 bg-white rounded-2xl border border-brand-100/50 shadow-card overflow-hidden flex flex-col">
@@ -916,9 +995,29 @@ export default function POSPage() {
                 )}
               </div>
 
+              {/* Balance Remaining (installment) */}
+              {completedSale.payment_type === 'installment' && completedSale.balance_remaining > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-center">
+                  <p className="text-xs text-amber-600 font-medium">Balance Remaining</p>
+                  <p className="text-xl font-bold text-amber-700">{formatCurrency(completedSale.balance_remaining)}</p>
+                </div>
+              )}
+
+              {/* Packages Created */}
+              {completedSale.packages_created.length > 0 && (
+                <div className="bg-brand-50 border border-brand-200 rounded-xl px-4 py-3 space-y-1">
+                  <p className="text-xs text-brand-600 font-semibold">📦 Packages Created</p>
+                  {completedSale.packages_created.map((pkg, i) => (
+                    <p key={i} className="text-xs text-brand-700">{pkg.service_name} — {pkg.total_sessions} sessions</p>
+                  ))}
+                </div>
+              )}
+
               {/* Badge */}
               <div className="text-center">
-                <Badge variant="success">Transaction Complete</Badge>
+                <Badge variant={completedSale.payment_type === 'installment' ? 'warning' : 'success'}>
+                  {completedSale.payment_type === 'installment' ? 'Installment Sale' : 'Transaction Complete'}
+                </Badge>
                 <p className="text-[10px] text-brand-400 mt-2">FitWhite Aesthetics · Thank you!</p>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { assertImusOnlyBranch, IMUS_ONLY, IMUS_BRANCH_CODE, ENABLE_SERVICE_BOM } from '@/lib/feature-flags';
 import type { Profile } from '@/types/database';
 
 /**
@@ -8,11 +9,15 @@ import type { Profile } from '@/types/database';
  *
  * Creates a complete sale transaction.
  *
- * Security fixes applied:
- *   [P1] All item ids are re-verified server-side against the DB — name and
- *        price are fetched from the server, NOT trusted from the client payload.
- *   [P2] Inventory deductions and audit logs use a compensating-transaction
- *        pattern: on any mid-flight failure the sale is deleted before returning.
+ * Phase 4 enhancements:
+ *   - Imus-only branch guard
+ *   - shift_id linkage (optional — no enforcement, just links if a shift is open)
+ *   - attending_doctor_id tracking
+ *   - payment_type support (full / installment / package_use)
+ *   - Service BOM auto-deduction from inventory
+ *   - inventory_logs (canonical) + stock_adjustments (backward compat)
+ *   - Auto-creates patient_packages for installment sales
+ *   - Auto-creates doctor_commissions when attending doctor is specified
  */
 export async function POST(request: NextRequest) {
   try {
@@ -36,6 +41,8 @@ export async function POST(request: NextRequest) {
       discount = 0,
       tax = 0,
       notes = null,
+      attending_doctor_id = null,
+      payment_type = 'full',
     } = body as {
       branch_id: string;
       customer_id?: string | null;
@@ -43,7 +50,6 @@ export async function POST(request: NextRequest) {
         item_type: 'service' | 'product' | 'bundle';
         id: string;
         quantity: number;
-        // name & unit_price intentionally NOT trusted — fetched server-side
       }>;
       payments: Array<{
         method: 'cash' | 'gcash' | 'card' | 'bank_transfer';
@@ -54,6 +60,8 @@ export async function POST(request: NextRequest) {
       discount?: number;
       tax?: number;
       notes?: string | null;
+      attending_doctor_id?: string | null;
+      payment_type?: 'full' | 'installment' | 'package_use';
     };
 
     // ─── Basic validation ────────────────────────────────────
@@ -62,6 +70,11 @@ export async function POST(request: NextRequest) {
     if (!items.length) return NextResponse.json({ error: 'Cart cannot be empty' }, { status: 400 });
     if (!payments.length) return NextResponse.json({ error: 'At least one payment required' }, { status: 400 });
 
+    // Installment sales require a customer
+    if (payment_type === 'installment' && !customer_id) {
+      return NextResponse.json({ error: 'Customer is required for installment sales' }, { status: 400 });
+    }
+
     // Manager / cashier branch isolation
     if ((caller.role === 'manager' || caller.role === 'cashier') && caller.branch_id !== branch_id) {
       return NextResponse.json({ error: 'Cannot process sales for a different branch' }, { status: 403 });
@@ -69,9 +82,31 @@ export async function POST(request: NextRequest) {
 
     const adminClient = createAdminClient();
 
-    // ─── [P1 FIX] Server-side item verification (parallel) ───
-    // Fetch real records from DB — never trust client-supplied name/price.
-    // All lookups fire simultaneously via Promise.all for speed.
+    // ─── Imus-only guard ─────────────────────────────────────
+    if (IMUS_ONLY) {
+      const { data: imusBranch } = await adminClient
+        .from('branches').select('id').eq('code', IMUS_BRANCH_CODE).single();
+      const imusBranchId = imusBranch ? (imusBranch as Record<string, unknown>).id as string : null;
+      try {
+        assertImusOnlyBranch(branch_id, imusBranchId);
+      } catch {
+        return NextResponse.json({ error: 'This installation is restricted to the Imus branch' }, { status: 403 });
+      }
+    }
+
+    // ─── Find open shift (no enforcement — just link if available) ──
+    let shiftId: string | null = null;
+    const { data: openShift } = await adminClient
+      .from('shifts')
+      .select('id')
+      .eq('branch_id', branch_id)
+      .eq('status', 'open')
+      .single();
+    if (openShift) {
+      shiftId = (openShift as Record<string, unknown>).id as string;
+    }
+
+    // ─── Server-side item verification (parallel) ────────────
 
     const verifiedItems: Array<{
       item_type: 'service' | 'product' | 'bundle';
@@ -80,9 +115,9 @@ export async function POST(request: NextRequest) {
       unit_price: number;
       quantity: number;
       product_id?: string | null;
+      default_session_count?: number;
     }> = [];
 
-    // Validate item_type and quantity first (cheap, no I/O)
     for (const item of items) {
       if (!['service', 'product', 'bundle'].includes(item.item_type)) {
         return NextResponse.json({ error: `Invalid item_type: ${item.item_type}` }, { status: 400 });
@@ -92,19 +127,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Parallel DB lookups for all items
     const itemLookupResults = await Promise.all(
       items.map(async (item) => {
         if (item.item_type === 'service') {
           const { data: svc, error: svcErr } = await adminClient
             .from('services')
-            .select('id, name, price, is_active, branch_id')
+            .select('id, name, price, is_active, branch_id, default_session_count')
             .eq('id', item.id)
             .eq('branch_id', branch_id)
             .eq('is_active', true)
             .single();
           return { item, record: svc as Record<string, unknown> | null, err: svcErr };
-
         } else if (item.item_type === 'product') {
           const { data: prod, error: prodErr } = await adminClient
             .from('products')
@@ -114,15 +147,12 @@ export async function POST(request: NextRequest) {
             .eq('is_active', true)
             .single();
           return { item, record: prod as Record<string, unknown> | null, err: prodErr };
-
         } else {
-          // bundles: extend here when bundle table is fully implemented
           return { item, record: null, err: new Error('Bundle checkout not yet implemented') };
         }
       })
     );
 
-    // Process lookup results
     for (const { item, record, err } of itemLookupResults) {
       if (err || !record) {
         const typeName = item.item_type.charAt(0).toUpperCase() + item.item_type.slice(1);
@@ -136,6 +166,7 @@ export async function POST(request: NextRequest) {
           name: record.name as string,
           unit_price: record.price as number,
           quantity: item.quantity,
+          default_session_count: (record.default_session_count as number) || 1,
         });
       } else if (item.item_type === 'product') {
         verifiedItems.push({
@@ -148,17 +179,13 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // ─── Inventory check (products only — parallel) ───────────
+    // ─── Inventory check (products only) ─────────────────────
 
     const productItems = verifiedItems.filter(i => i.item_type === 'product');
     const invResults = await Promise.all(
       productItems.map(item =>
-        adminClient
-          .from('inventory')
-          .select('id, quantity')
-          .eq('product_id', item.id)
-          .eq('branch_id', branch_id)
-          .single()
+        adminClient.from('inventory').select('id, quantity')
+          .eq('product_id', item.id).eq('branch_id', branch_id).single()
           .then(({ data, error }) => ({ item, inv: data as Record<string, unknown> | null, error }))
       )
     );
@@ -176,6 +203,38 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ─── BOM stock check (services — prevent selling if consumables unavailable) ──
+    if (ENABLE_SERVICE_BOM) {
+      const serviceItems = verifiedItems.filter(i => i.item_type === 'service');
+      for (const svcItem of serviceItems) {
+        const { data: bomEntries } = await adminClient
+          .from('service_consumables')
+          .select('product_id, quantity, products:product_id(name)')
+          .eq('service_id', svcItem.id);
+
+        if (bomEntries && bomEntries.length > 0) {
+          for (const bom of bomEntries as Record<string, unknown>[]) {
+            const bomProductId = bom.product_id as string;
+            const bomQtyNeeded = (bom.quantity as number) * svcItem.quantity;
+            const productName = (bom.products as Record<string, unknown>)?.name as string || bomProductId;
+
+            const { data: bomInv } = await adminClient
+              .from('inventory')
+              .select('quantity')
+              .eq('product_id', bomProductId)
+              .eq('branch_id', branch_id)
+              .single();
+
+            const available = bomInv ? (bomInv as Record<string, unknown>).quantity as number : 0;
+            if (available < bomQtyNeeded) {
+              return NextResponse.json({
+                error: `Insufficient consumable stock for "${svcItem.name}": needs ${bomQtyNeeded}× "${productName}" but only ${available} available`
+              }, { status: 400 });
+            }
+          }
+        }
+      }
+    }
 
     // ─── Totals (computed from server-verified prices) ────────
 
@@ -183,7 +242,9 @@ export async function POST(request: NextRequest) {
     const total = Math.max(0, subtotal - discount + tax);
 
     const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
-    if (totalPaid < total) {
+
+    // For installment sales, allow partial payment (downpayment)
+    if (payment_type === 'full' && totalPaid < total - 0.01) {
       return NextResponse.json({
         error: `Insufficient payment. Total: ₱${total.toFixed(2)}, Paid: ₱${totalPaid.toFixed(2)}`
       }, { status: 400 });
@@ -213,6 +274,9 @@ export async function POST(request: NextRequest) {
         total,
         status: 'completed',
         notes: notes || null,
+        shift_id: shiftId,
+        attending_doctor_id: attending_doctor_id || null,
+        payment_type,
       } as Record<string, unknown>)
       .select('id')
       .single();
@@ -223,7 +287,7 @@ export async function POST(request: NextRequest) {
 
     const saleId = (saleData as Record<string, unknown>).id as string;
 
-    // ─── Insert Sale Items (server-verified names & prices) ───
+    // ─── Insert Sale Items ───────────────────────────────────
 
     const saleItemsPayload = verifiedItems.map(item => ({
       sale_id: saleId,
@@ -231,15 +295,16 @@ export async function POST(request: NextRequest) {
       service_id: item.item_type === 'service' ? item.id : null,
       product_id: item.item_type === 'product' ? item.id : null,
       bundle_id:  item.item_type === 'bundle'  ? item.id : null,
-      name: item.name,            // server-resolved
+      name: item.name,
       quantity: item.quantity,
-      unit_price: item.unit_price, // server-resolved
+      unit_price: item.unit_price,
       total_price: item.unit_price * item.quantity,
     }));
 
-    const { error: itemsError } = await adminClient
+    const { data: insertedSaleItems, error: itemsError } = await adminClient
       .from('sale_items')
-      .insert(saleItemsPayload as Record<string, unknown>[]);
+      .insert(saleItemsPayload as Record<string, unknown>[])
+      .select('id, item_type, service_id, product_id');
 
     if (itemsError) {
       await adminClient.from('sales').delete().eq('id', saleId);
@@ -265,7 +330,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: paymentsError.message }, { status: 500 });
     }
 
-    // ─── Adjust Inventory ────────────────────────────────────
+    // ─── Adjust Inventory — Products (dual-write) ────────────
 
     for (const item of verifiedItems.filter(i => i.item_type === 'product')) {
       const { data: inv } = await adminClient
@@ -277,13 +342,14 @@ export async function POST(request: NextRequest) {
 
       if (inv) {
         const invRecord = inv as Record<string, unknown>;
-        const newQty = (invRecord.quantity as number) - item.quantity;
+        const oldQty = invRecord.quantity as number;
+        const newQty = oldQty - item.quantity;
 
-        await adminClient
-          .from('inventory')
+        await adminClient.from('inventory')
           .update({ quantity: newQty } as Record<string, unknown>)
           .eq('id', invRecord.id as string);
 
+        // Legacy stock_adjustments (backward compat)
         await adminClient.from('stock_adjustments').insert({
           inventory_id: invRecord.id as string,
           branch_id,
@@ -293,6 +359,157 @@ export async function POST(request: NextRequest) {
           reason: `Sale ${receiptNumber}`,
           reference_id: saleId,
         } as Record<string, unknown>);
+
+        // New canonical inventory_logs
+        await adminClient.from('inventory_logs').insert({
+          inventory_id: invRecord.id as string,
+          product_id: item.id,
+          branch_id,
+          performed_by: currentUser.id,
+          source: 'sale_product',
+          quantity_delta: -item.quantity,
+          quantity_before: oldQty,
+          quantity_after: newQty,
+          sale_id: saleId,
+        } as Record<string, unknown>);
+      }
+    }
+
+    // ─── Service BOM deduction ───────────────────────────────
+
+    if (ENABLE_SERVICE_BOM) {
+      for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
+        const { data: bomEntries } = await adminClient
+          .from('service_consumables')
+          .select('product_id, quantity')
+          .eq('service_id', svcItem.id);
+
+        if (bomEntries && bomEntries.length > 0) {
+          for (const bom of bomEntries as Record<string, unknown>[]) {
+            const bomProductId = bom.product_id as string;
+            const bomQty = (bom.quantity as number) * svcItem.quantity;
+
+            const { data: bomInv } = await adminClient
+              .from('inventory')
+              .select('id, quantity')
+              .eq('product_id', bomProductId)
+              .eq('branch_id', branch_id)
+              .single();
+
+            if (bomInv) {
+              const bomInvData = bomInv as Record<string, unknown>;
+              const oldQty = bomInvData.quantity as number;
+              const newQty = Math.max(0, oldQty - bomQty);
+
+              await adminClient.from('inventory')
+                .update({ quantity: newQty } as Record<string, unknown>)
+                .eq('id', bomInvData.id as string);
+
+              await adminClient.from('inventory_logs').insert({
+                inventory_id: bomInvData.id as string,
+                product_id: bomProductId,
+                branch_id,
+                performed_by: currentUser.id,
+                source: 'service_bom',
+                quantity_delta: -bomQty,
+                quantity_before: oldQty,
+                quantity_after: newQty,
+                sale_id: saleId,
+                notes: `BOM for "${svcItem.name}" — Sale ${receiptNumber}`,
+              } as Record<string, unknown>);
+            }
+          }
+        }
+      }
+    }
+
+    // ─── Doctor commission for direct service sales ───────────
+
+    if (attending_doctor_id) {
+      const { data: doctorProfile } = await adminClient
+        .from('profiles')
+        .select('id, is_doctor, default_commission_rate')
+        .eq('id', attending_doctor_id)
+        .single();
+
+      if (doctorProfile && (doctorProfile as Record<string, unknown>).is_doctor) {
+        const doc = doctorProfile as Record<string, unknown>;
+        const rate = doc.default_commission_rate as number | null;
+
+        if (rate && rate > 0) {
+          const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
+          for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
+            const matchingSaleItem = saleItemsData.find(
+              si => si.service_id === svcItem.id
+            );
+            const grossAmount = svcItem.unit_price * svcItem.quantity;
+            const commAmount = grossAmount * rate;
+
+            await adminClient.from('doctor_commissions').insert({
+              branch_id,
+              doctor_id: attending_doctor_id,
+              sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
+              gross_amount: grossAmount,
+              commission_rate: rate,
+              commission_amount: commAmount,
+            } as Record<string, unknown>);
+          }
+        }
+      }
+    }
+
+    // ─── Auto-create packages for installment sales ──────────
+
+    const createdPackages: Array<{ id: string; service_name: string; total_sessions: number }> = [];
+
+    if (payment_type === 'installment' && customer_id) {
+      const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
+
+      for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
+        const sessionCount = svcItem.default_session_count || 1;
+        if (sessionCount <= 1) continue; // Only create packages for multi-session services
+
+        const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
+        const itemTotal = svcItem.unit_price * svcItem.quantity;
+
+        const { data: pkg } = await adminClient
+          .from('patient_packages')
+          .insert({
+            branch_id,
+            customer_id,
+            service_id: svcItem.id,
+            sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
+            total_price: itemTotal,
+            downpayment: Math.min(totalPaid, itemTotal), // allocate payment proportionally
+            total_paid: Math.min(totalPaid, itemTotal),
+            total_sessions: sessionCount * svcItem.quantity,
+            attending_doctor_id: attending_doctor_id || null,
+            status: 'active',
+            notes: `Auto-created from sale ${receiptNumber}`,
+          } as Record<string, unknown>)
+          .select('id')
+          .single();
+
+        if (pkg) {
+          createdPackages.push({
+            id: (pkg as Record<string, unknown>).id as string,
+            service_name: svcItem.name,
+            total_sessions: sessionCount * svcItem.quantity,
+          });
+
+          // Record downpayment in package_payments ledger
+          const downpayment = Math.min(totalPaid, itemTotal);
+          if (downpayment > 0) {
+            await adminClient.from('package_payments').insert({
+              package_id: (pkg as Record<string, unknown>).id as string,
+              branch_id,
+              received_by: currentUser.id,
+              amount: downpayment,
+              method: payments[0]?.method || 'cash',
+              notes: `Downpayment from sale ${receiptNumber}`,
+            } as Record<string, unknown>);
+          }
+        }
       }
     }
 
@@ -304,11 +521,15 @@ export async function POST(request: NextRequest) {
       action_type: 'SALE_COMPLETED',
       entity_type: 'sale',
       entity_id: saleId,
-      description: `Sale ${receiptNumber} — ₱${total.toFixed(2)}`,
+      description: `Sale ${receiptNumber} — ₱${total.toFixed(2)} (${payment_type})`,
       metadata: {
         receipt_number: receiptNumber, total,
         items_count: verifiedItems.length,
         payment_methods: payments.map(p => p.method),
+        payment_type,
+        attending_doctor_id,
+        shift_id: shiftId,
+        packages_created: createdPackages.length,
       },
     } as Record<string, unknown>);
 
@@ -317,6 +538,8 @@ export async function POST(request: NextRequest) {
       sale_id: saleId,
       receipt_number: receiptNumber,
       total,
+      payment_type,
+      packages_created: createdPackages,
     });
 
   } catch (error) {
