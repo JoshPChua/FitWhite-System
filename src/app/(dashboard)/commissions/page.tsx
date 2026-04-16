@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { downloadCsv, toCsv, csvCurrency, csvDate, type CsvColumn } from '@/lib/export-csv';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -145,7 +146,7 @@ export default function CommissionsPage() {
           <h1 className="text-2xl font-display font-semibold text-brand-900">Doctor Commissions</h1>
           <p className="text-sm text-brand-500 mt-1">Track and manage doctor commissions for services performed</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           {/* Filter */}
           <div className="flex rounded-xl border border-brand-200 overflow-hidden bg-white">
             {(['unpaid', 'paid', 'all'] as const).map(s => (
@@ -157,6 +158,27 @@ export default function CommissionsPage() {
               </button>
             ))}
           </div>
+          {/* Export CSV */}
+          <button
+            onClick={() => {
+              const columns: CsvColumn<Commission>[] = [
+                { header: 'Date', accessor: r => csvDate(r.created_at) },
+                { header: 'Doctor', accessor: r => r.doctor_name },
+                { header: 'Source', accessor: r => r.source_label },
+                { header: 'Gross Amount', accessor: r => csvCurrency(r.gross_amount) },
+                { header: 'Rate', accessor: r => `${(r.commission_rate * 100).toFixed(0)}%` },
+                { header: 'Commission', accessor: r => csvCurrency(r.commission_amount) },
+                { header: 'Status', accessor: r => r.is_paid ? 'Paid' : 'Unpaid' },
+                { header: 'Paid At', accessor: r => csvDate(r.paid_at) },
+              ];
+              downloadCsv(toCsv(commissions, columns), `commissions-${filterPaid}-${new Date().toISOString().split('T')[0]}.csv`);
+            }}
+            disabled={commissions.length === 0}
+            className="px-3 py-1.5 rounded-xl border border-brand-200 bg-white text-xs font-medium text-brand-600 hover:bg-brand-50
+                       disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            📥 Export CSV
+          </button>
           {/* Bulk pay */}
           {canManage && selectedIds.size > 0 && (
             <button onClick={handleMarkPaid} disabled={isMarking}

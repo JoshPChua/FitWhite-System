@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
+import { downloadCsv, toCsv, csvCurrency, csvDate, type CsvColumn } from '@/lib/export-csv';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ export default function PackagesPage() {
 
   // Record Session Modal
   const [showSessionModal, setShowSessionModal] = useState(false);
-  const [sessionForm, setSessionForm] = useState({ doctor_id: '', notes: '' });
+  const [sessionForm, setSessionForm] = useState({ doctor_id: '', notes: '', sessions_count: '1' });
   const [sessionSubmitting, setSessionSubmitting] = useState(false);
 
   // Record Payment Modal
@@ -197,7 +198,7 @@ export default function PackagesPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          sessions_count: 1,
+          sessions_count: parseInt(sessionForm.sessions_count) || 1,
           doctor_id: sessionForm.doctor_id || null,
           notes: sessionForm.notes || null,
         }),
@@ -205,7 +206,7 @@ export default function PackagesPage() {
       const result = await res.json();
       if (!res.ok) { setFormError(result.error); return; }
       setShowSessionModal(false);
-      setSessionForm({ doctor_id: '', notes: '' });
+      setSessionForm({ doctor_id: '', notes: '', sessions_count: '1' });
       await openDetail(selectedPkg);
       fetchPackages();
     } catch (err) {
@@ -278,16 +279,39 @@ export default function PackagesPage() {
             Manage session packages, track sessions used, and process installment payments
           </p>
         </div>
-        {/* Status filter */}
-        <div className="flex rounded-xl border border-brand-200 overflow-hidden bg-white">
-          {(['active', 'completed', 'all'] as const).map(s => (
-            <button key={s} onClick={() => setFilterStatus(s)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                filterStatus === s ? 'bg-brand-600 text-white' : 'text-brand-500 hover:bg-brand-50'
-              }`}>
-              {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
-            </button>
-          ))}
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Status filter */}
+          <div className="flex rounded-xl border border-brand-200 overflow-hidden bg-white">
+            {(['active', 'completed', 'all'] as const).map(s => (
+              <button key={s} onClick={() => setFilterStatus(s)}
+                className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                  filterStatus === s ? 'bg-brand-600 text-white' : 'text-brand-500 hover:bg-brand-50'
+                }`}>
+                {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
+          {/* Export CSV */}
+          <button
+            onClick={() => {
+              const columns: CsvColumn<PatientPackage>[] = [
+                { header: 'Client', accessor: r => r.customer_name },
+                { header: 'Service', accessor: r => r.service_name },
+                { header: 'Status', accessor: r => r.status },
+                { header: 'Total Price', accessor: r => csvCurrency(r.total_price) },
+                { header: 'Paid', accessor: r => csvCurrency(r.total_paid) },
+                { header: 'Balance', accessor: r => csvCurrency(r.remaining_balance) },
+                { header: 'Sessions Used', accessor: r => `${r.sessions_used}/${r.total_sessions}` },
+                { header: 'Created', accessor: r => csvDate(r.created_at) },
+              ];
+              downloadCsv(toCsv(packages, columns), `packages-${filterStatus}-${new Date().toISOString().split('T')[0]}.csv`);
+            }}
+            disabled={packages.length === 0}
+            className="px-3 py-1.5 rounded-xl border border-brand-200 bg-white text-xs font-medium text-brand-600 hover:bg-brand-50
+                       disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            📥 Export CSV
+          </button>
         </div>
       </div>
 
@@ -529,6 +553,20 @@ export default function PackagesPage() {
               <option value="">No doctor</option>
               {doctors.map(d => <option key={d.id} value={d.id}>Dr. {d.first_name} {d.last_name}</option>)}
             </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-brand-800 mb-1.5">Sessions to Deduct</label>
+            <input type="number" value={sessionForm.sessions_count} min="1"
+              max={selectedPkg ? selectedPkg.total_sessions - selectedPkg.sessions_used : 1}
+              onChange={e => setSessionForm({ ...sessionForm, sessions_count: e.target.value })}
+              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
+                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all" />
+            {selectedPkg && (
+              <p className="text-[10px] text-brand-400 mt-1">
+                Remaining: {selectedPkg.total_sessions - selectedPkg.sessions_used} of {selectedPkg.total_sessions} sessions
+              </p>
+            )}
           </div>
 
           <div>

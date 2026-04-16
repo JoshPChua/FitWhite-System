@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
-import { ENABLE_DOCTOR_COMMISSIONS } from '@/lib/feature-flags';
+import { ENABLE_DOCTOR_COMMISSIONS, ENABLE_SERVICE_BOM } from '@/lib/feature-flags';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -118,6 +118,15 @@ export default function POSPage() {
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [attendingDoctorId, setAttendingDoctorId] = useState<string>('');
   const [paymentType, setPaymentType] = useState<'full' | 'installment'>('full');
+
+  // Extra consumables modal
+  const [showExtraConsumable, setShowExtraConsumable] = useState(false);
+  const [extraProducts, setExtraProducts] = useState<Array<{id: string; name: string; stock: number}>>([]);
+  const [extraSelectedProduct, setExtraSelectedProduct] = useState('');
+  const [extraQty, setExtraQty] = useState('1');
+  const [extraNotes, setExtraNotes] = useState('');
+  const [extraSubmitting, setExtraSubmitting] = useState(false);
+  const [extraError, setExtraError] = useState('');
 
   // ─── Fetch Catalog ────────────────────────────────────────
 
@@ -795,15 +804,45 @@ export default function POSPage() {
               <span className="text-xl text-brand-900">{formatCurrency(total)}</span>
             </div>
           </div>
-          <button
-            onClick={openPayment}
-            disabled={!cart.length || !posBranch?.id}
-            className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white font-semibold text-base
-                       hover:from-brand-700 hover:to-brand-800 active:scale-[0.99] transition-all duration-200 shadow-sm hover:shadow-md
-                       disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Charge {cart.length > 0 ? formatCurrency(total) : ''}
-          </button>
+          <div className="flex gap-2">
+            {ENABLE_SERVICE_BOM && posBranch?.id && (
+              <button
+                onClick={async () => {
+                  setExtraError('');
+                  setExtraSelectedProduct('');
+                  setExtraQty('1');
+                  setExtraNotes('');
+                  // Fetch products with stock for the branch
+                  const { data: prods } = await supabase
+                    .from('products')
+                    .select('id, name, inventory!inner(quantity)')
+                    .eq('branch_id', posBranch.id)
+                    .eq('is_active', true)
+                    .order('name');
+                  setExtraProducts((prods || []).map((p: Record<string, unknown>) => ({
+                    id: p.id as string,
+                    name: p.name as string,
+                    stock: ((p.inventory as Record<string, unknown>[])?.[0]?.quantity as number) ?? 0,
+                  })).filter(p => p.stock > 0));
+                  setShowExtraConsumable(true);
+                }}
+                className="py-3 px-4 rounded-xl border-2 border-dashed border-amber-400 text-amber-700 font-semibold text-sm
+                           hover:bg-amber-50 active:scale-[0.99] transition-all duration-200"
+                title="Deduct inventory items without charging the customer"
+              >
+                🧪 Extra Consumable
+              </button>
+            )}
+            <button
+              onClick={openPayment}
+              disabled={!cart.length || !posBranch?.id}
+              className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white font-semibold text-base
+                         hover:from-brand-700 hover:to-brand-800 active:scale-[0.99] transition-all duration-200 shadow-sm hover:shadow-md
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Charge {cart.length > 0 ? formatCurrency(total) : ''}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1036,6 +1075,82 @@ export default function POSPage() {
               >
                 New Sale
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ═══ Extra Consumable Modal ════════════════════════════ */}
+      {showExtraConsumable && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-brand-950/40 backdrop-blur-sm" onClick={() => !extraSubmitting && setShowExtraConsumable(false)} />
+          <div className="relative w-full max-w-sm bg-white rounded-2xl shadow-dropdown border border-brand-100/50 animate-slide-up overflow-hidden">
+            <div className="px-6 py-5 border-b border-brand-100/60">
+              <h2 className="text-lg font-semibold text-brand-900">🧪 Extra Consumable</h2>
+              <p className="text-xs text-brand-400 mt-1">Deduct inventory items without charging the customer</p>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              {extraError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{extraError}</div>
+              )}
+              <div>
+                <label className="block text-sm font-medium text-brand-800 mb-1.5">Product</label>
+                <select value={extraSelectedProduct} onChange={e => setExtraSelectedProduct(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
+                             focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all">
+                  <option value="">Select product...</option>
+                  {extraProducts.map(p => (
+                    <option key={p.id} value={p.id}>{p.name} ({p.stock} in stock)</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-brand-800 mb-1.5">Quantity</label>
+                <input type="number" value={extraQty} min="1" onChange={e => setExtraQty(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
+                             focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-brand-800 mb-1.5">Notes <span className="text-brand-300 font-normal">(optional)</span></label>
+                <input type="text" value={extraNotes} onChange={e => setExtraNotes(e.target.value)}
+                  placeholder="e.g. Additional syringe for patient"
+                  className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900 placeholder:text-brand-300
+                             focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all" />
+              </div>
+              <div className="flex gap-3">
+                <button
+                  disabled={!extraSelectedProduct || extraSubmitting}
+                  onClick={async () => {
+                    setExtraSubmitting(true);
+                    setExtraError('');
+                    try {
+                      const res = await fetch('/api/inventory/extra-consumable', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          product_id: extraSelectedProduct,
+                          branch_id: posBranch?.id,
+                          quantity: parseInt(extraQty) || 1,
+                          notes: extraNotes || null,
+                        }),
+                      });
+                      const result = await res.json();
+                      if (!res.ok) { setExtraError(result.error); return; }
+                      setShowExtraConsumable(false);
+                      fetchCatalog(); // refresh stock counts
+                    } catch {
+                      setExtraError('Network error');
+                    } finally {
+                      setExtraSubmitting(false);
+                    }
+                  }}
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-600 to-amber-700 text-white font-medium text-sm
+                             disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
+                >
+                  {extraSubmitting ? 'Deducting...' : 'Deduct from Inventory'}
+                </button>
+                <button onClick={() => setShowExtraConsumable(false)}
+                  className="px-4 py-2.5 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">Cancel</button>
+              </div>
             </div>
           </div>
         </div>

@@ -8,6 +8,7 @@ import {
   ENABLE_PATIENT_PACKAGES,
   ENABLE_SHIFTS,
   ENABLE_DOCTOR_COMMISSIONS,
+  ENABLE_SERVICE_BOM,
 } from '@/lib/feature-flags';
 
 const ownerNav = [
@@ -16,6 +17,7 @@ const ownerNav = [
   { href: '/services', label: 'Services', icon: ServicesIcon },
   { href: '/products', label: 'Products', icon: ProductsIcon },
   { href: '/inventory', label: 'Inventory', icon: InventoryIcon },
+  ...(ENABLE_SERVICE_BOM ? [{ href: '/inventory-logs', label: 'Stock Logs', icon: StockLogsIcon }] : []),
   { href: '/bundles', label: 'Bundles', icon: BundlesIcon },
   { href: '/customers', label: 'Customers', icon: CustomersIcon },
   { href: '/sales', label: 'Sales', icon: SalesIcon },
@@ -34,6 +36,7 @@ const managerNav = [
   { href: '/services', label: 'Services', icon: ServicesIcon },
   { href: '/products', label: 'Products', icon: ProductsIcon },
   { href: '/inventory', label: 'Inventory', icon: InventoryIcon },
+  ...(ENABLE_SERVICE_BOM ? [{ href: '/inventory-logs', label: 'Stock Logs', icon: StockLogsIcon }] : []),
   { href: '/bundles', label: 'Bundles', icon: BundlesIcon },
   { href: '/customers', label: 'Customers', icon: CustomersIcon },
   { href: '/sales', label: 'Sales', icon: SalesIcon },
@@ -247,6 +250,14 @@ function CommissionsIcon({ className = '' }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
       <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+  );
+}
+
+function StockLogsIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m5.231 13.481L15 17.25m-4.5-15H5.625c-.621 0-1.125.504-1.125 1.125v16.5c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9zm3.75 11.625a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
     </svg>
   );
 }

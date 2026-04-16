@@ -23,6 +23,7 @@ interface Service {
   created_at: string;
   updated_at: string;
   bom_count?: number;
+  default_session_count?: number;
 }
 
 interface BomEntry {
@@ -46,6 +47,7 @@ interface ServiceFormData {
   price: string;
   duration_minutes: string;
   category: string;
+  default_session_count: string;
 }
 
 const SERVICE_CATEGORIES = [
@@ -80,6 +82,7 @@ export default function ServicesPage() {
     price: '',
     duration_minutes: '',
     category: '',
+    default_session_count: '1',
   });
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
@@ -130,6 +133,7 @@ export default function ServicesPage() {
         is_active: s.is_active as boolean,
         created_at: s.created_at as string,
         updated_at: s.updated_at as string,
+        default_session_count: (s.default_session_count as number) || 1,
       })));
     } catch (err) {
       console.error('Services page error:', err);
@@ -169,7 +173,7 @@ export default function ServicesPage() {
     setEditingService(null);
     setFormData({
       branch_id: isManager ? (selectedBranch?.id || '') : (branches[0]?.id || ''),
-      name: '', description: '', price: '', duration_minutes: '', category: '',
+      name: '', description: '', price: '', duration_minutes: '', category: '', default_session_count: '1',
     });
     setFormError(''); setFormSuccess('');
     setIsModalOpen(true);
@@ -185,6 +189,7 @@ export default function ServicesPage() {
       price: String(s.price),
       duration_minutes: s.duration_minutes ? String(s.duration_minutes) : '',
       category: s.category || '',
+      default_session_count: s.default_session_count ? String(s.default_session_count) : '1',
     });
     setFormError(''); setFormSuccess('');
     setIsModalOpen(true);
@@ -209,6 +214,7 @@ export default function ServicesPage() {
             price,
             duration_minutes: formData.duration_minutes ? parseInt(formData.duration_minutes) : null,
             category: formData.category || null,
+            default_session_count: parseInt(formData.default_session_count) || 1,
           }),
         });
         const result = await res.json();
@@ -696,6 +702,19 @@ export default function ServicesPage() {
               <option value="">Select category...</option>
               {SERVICE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
+          </div>
+
+          {/* Session Count */}
+          <div>
+            <label className="block text-sm font-medium text-brand-800 mb-1.5">Sessions per Purchase</label>
+            <input
+              type="number" value={formData.default_session_count} min="1"
+              onChange={e => setFormData({ ...formData, default_session_count: e.target.value })}
+              placeholder="1"
+              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900 placeholder:text-brand-300
+                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all"
+            />
+            <p className="text-[10px] text-brand-400 mt-1">Set {'>'} 1 to auto-create multi-session packages when sold as installment</p>
           </div>
 
           {/* Submit */}
