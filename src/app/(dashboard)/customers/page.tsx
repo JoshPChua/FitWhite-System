@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
+import { IMUS_ONLY, IMUS_BRANCH_CODE, ENABLE_PATIENT_PACKAGES } from '@/lib/feature-flags';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -68,6 +69,13 @@ export default function CustomersPage() {
   const [detailCustomer, setDetailCustomer] = useState<Customer | null>(null);
   const [visitHistory, setVisitHistory] = useState<VisitHistoryEntry[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
+  // Client A/R packages
+  const [customerPackages, setCustomerPackages] = useState<Array<{
+    id: string; service_name: string; status: string;
+    total_price: number; total_paid: number; remaining_balance: number;
+    total_sessions: number; sessions_used: number; created_at: string;
+  }>>([]);
 
   // Delete
   const [deleteTarget, setDeleteTarget] = useState<Customer | null>(null);
@@ -152,6 +160,30 @@ export default function CustomersPage() {
       console.error('Visit history error:', err);
     } finally {
       setIsLoadingHistory(false);
+    }
+
+    // Fetch packages (A/R)
+    if (ENABLE_PATIENT_PACKAGES) {
+      try {
+        const { data: pkgData } = await supabase
+          .from('patient_packages')
+          .select('id, status, total_price, total_paid, remaining_balance, total_sessions, sessions_used, created_at, services:service_id(name)')
+          .eq('customer_id', customer.id)
+          .order('created_at', { ascending: false });
+        setCustomerPackages((pkgData || []).map((p: Record<string, unknown>) => ({
+          id: p.id as string,
+          service_name: (p.services as Record<string, unknown>)?.name as string || 'Unknown',
+          status: p.status as string,
+          total_price: Number(p.total_price),
+          total_paid: Number(p.total_paid),
+          remaining_balance: Number(p.remaining_balance),
+          total_sessions: Number(p.total_sessions),
+          sessions_used: Number(p.sessions_used),
+          created_at: p.created_at as string,
+        })));
+      } catch (err) {
+        console.error('Customer packages error:', err);
+      }
     }
   };
 
@@ -322,7 +354,7 @@ export default function CustomersPage() {
                          placeholder:text-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all"
             />
           </div>
-          {isOwner && (
+          {isOwner && !IMUS_ONLY && (
             <div>
               <label className="block text-xs font-medium text-brand-500 mb-1">Branch</label>
               <select
@@ -331,7 +363,7 @@ export default function CustomersPage() {
                            focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all"
               >
                 <option value="">All branches</option>
-                {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                {(IMUS_ONLY ? branches.filter(b => b.code === IMUS_BRANCH_CODE) : branches).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>
             </div>
           )}
@@ -345,7 +377,7 @@ export default function CustomersPage() {
             <thead>
               <tr className="border-b border-brand-100/60 bg-surface-50">
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Patient</th>
-                {isOwner && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
+                {isOwner && !IMUS_ONLY && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Contact</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Allergies</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Credits</th>
@@ -358,7 +390,7 @@ export default function CustomersPage() {
                 Array.from({ length: 6 }).map((_, i) => (
                   <tr key={i} className="border-b border-brand-100/30">
                     <td className="px-5 py-4"><div className="flex items-center gap-3"><Skeleton className="w-9 h-9 rounded-full" /><div><Skeleton className="h-4 w-28 mb-1" /><Skeleton className="h-3 w-16" /></div></div></td>
-                    {isOwner && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
                     <td className="px-5 py-4"><Skeleton className="h-4 w-32" /></td>
                     <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>
                     <td className="px-5 py-4"><Skeleton className="h-4 w-16" /></td>
@@ -368,7 +400,7 @@ export default function CustomersPage() {
                 ))
               ) : filteredCustomers.length === 0 ? (
                 <tr>
-                  <td colSpan={isOwner ? 7 : 6} className="text-center py-16 text-sm text-brand-400">
+                  <td colSpan={isOwner && !IMUS_ONLY ? 7 : 6} className="text-center py-16 text-sm text-brand-400">
                     <svg className="w-12 h-12 text-brand-200 mx-auto mb-3" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
                     </svg>
@@ -388,7 +420,7 @@ export default function CustomersPage() {
                         </div>
                       </div>
                     </td>
-                    {isOwner && <td className="px-5 py-4"><span className="text-sm text-brand-500">{c.branch_name}</span></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><span className="text-sm text-brand-500">{c.branch_name}</span></td>}
                     <td className="px-5 py-4">
                       <div className="space-y-0.5">
                         {c.phone && <p className="text-xs text-brand-600">{c.phone}</p>}
@@ -484,7 +516,7 @@ export default function CustomersPage() {
           )}
 
           {/* Branch (Owner create only) */}
-          {isOwner && formMode === 'create' && (
+          {isOwner && !IMUS_ONLY && formMode === 'create' && (
             <div>
               <label className="block text-sm font-medium text-brand-800 mb-1.5">Branch</label>
               <select
@@ -494,7 +526,7 @@ export default function CustomersPage() {
                            focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all"
               >
                 <option value="">Select branch...</option>
-                {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                {(IMUS_ONLY ? branches.filter(b => b.code === IMUS_BRANCH_CODE) : branches).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
               </select>
             </div>
           )}
@@ -588,7 +620,7 @@ export default function CustomersPage() {
 
       {/* ─── Detail / Visit History Modal ────────────────────── */}
       <Modal
-        isOpen={!!detailCustomer} onClose={() => { setDetailCustomer(null); setVisitHistory([]); }}
+        isOpen={!!detailCustomer} onClose={() => { setDetailCustomer(null); setVisitHistory([]); setCustomerPackages([]); }}
         title={detailCustomer ? `${detailCustomer.first_name} ${detailCustomer.last_name}` : ''}
         subtitle="Patient profile & treatment history"
         size="lg"
@@ -614,6 +646,60 @@ export default function CustomersPage() {
                 </div>
               )}
             </div>
+
+            {/* ─── A/R: Active Packages & Balances ──────────────── */}
+            {ENABLE_PATIENT_PACKAGES && customerPackages.length > 0 && (
+              <div>
+                <h3 className="text-sm font-semibold text-brand-800 mb-3">Packages & Accounts Receivable</h3>
+                {/* A/R Summary */}
+                {(() => {
+                  const active = customerPackages.filter(p => p.status === 'active');
+                  const totalAR = active.reduce((s, p) => s + p.remaining_balance, 0);
+                  const totalPaid = customerPackages.reduce((s, p) => s + p.total_paid, 0);
+                  return (
+                    <div className="grid grid-cols-3 gap-2 mb-3">
+                      <div className="bg-surface-50 rounded-xl px-3 py-2 text-center">
+                        <p className="text-[10px] text-brand-400 uppercase">Active Packages</p>
+                        <p className="text-lg font-semibold text-brand-800">{active.length}</p>
+                      </div>
+                      <div className="bg-surface-50 rounded-xl px-3 py-2 text-center">
+                        <p className="text-[10px] text-brand-400 uppercase">Total Paid</p>
+                        <p className="text-lg font-semibold text-emerald-600">{formatCurrency(totalPaid)}</p>
+                      </div>
+                      <div className="bg-surface-50 rounded-xl px-3 py-2 text-center">
+                        <p className="text-[10px] text-brand-400 uppercase">Outstanding A/R</p>
+                        <p className={`text-lg font-semibold ${totalAR > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                          {totalAR > 0 ? formatCurrency(totalAR) : 'Paid'}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {/* Package list */}
+                <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                  {customerPackages.map(pkg => (
+                    <div key={pkg.id} className="bg-surface-50 rounded-xl p-3 border border-brand-100/50">
+                      <div className="flex items-center justify-between gap-3 mb-1.5">
+                        <span className="text-sm font-medium text-brand-800 truncate">{pkg.service_name}</span>
+                        <Badge variant={pkg.status === 'active' ? 'brand' : pkg.status === 'completed' ? 'success' : 'default'} size="sm">
+                          {pkg.status}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-brand-500">Sessions: {pkg.sessions_used}/{pkg.total_sessions}</span>
+                        <span className={pkg.remaining_balance > 0 ? 'text-rose-600 font-medium' : 'text-emerald-600'}>
+                          {pkg.remaining_balance > 0 ? `Balance: ${formatCurrency(pkg.remaining_balance)}` : 'Fully Paid'}
+                        </span>
+                      </div>
+                      {/* Session progress bar */}
+                      <div className="mt-1.5 w-full bg-brand-100 rounded-full h-1.5">
+                        <div className="bg-brand-500 h-1.5 rounded-full transition-all" style={{ width: `${(pkg.sessions_used / pkg.total_sessions) * 100}%` }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Treatment History */}
             <div>
@@ -658,7 +744,7 @@ export default function CustomersPage() {
                   Edit Profile
                 </button>
               )}
-              <button onClick={() => { setDetailCustomer(null); setVisitHistory([]); }}
+              <button onClick={() => { setDetailCustomer(null); setVisitHistory([]); setCustomerPackages([]); }}
                 className={`py-2.5 px-4 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors ${!canManage ? 'flex-1' : ''}`}>
                 Close
               </button>

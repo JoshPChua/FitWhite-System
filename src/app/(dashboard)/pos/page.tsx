@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
-import { ENABLE_DOCTOR_COMMISSIONS, ENABLE_SERVICE_BOM } from '@/lib/feature-flags';
+import { ENABLE_DOCTOR_COMMISSIONS, ENABLE_SERVICE_BOM, IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -469,7 +469,7 @@ export default function POSPage() {
               ))}
             </div>
             {/* Branch selector (owner/manager only) */}
-            {(isOwner || isManager) && (
+            {(isOwner || isManager) && !IMUS_ONLY && (
               <select
                 value={posBranch?.id || ''}
                 onChange={e => {

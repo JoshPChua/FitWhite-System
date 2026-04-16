@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { SaleStatus } from '@/types/database';
+import { IMUS_ONLY } from '@/lib/feature-flags';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -309,7 +310,7 @@ export default function SalesPage() {
               className="w-full px-3 py-2 rounded-xl border border-brand-200 bg-surface-50 text-sm text-brand-800
                          placeholder:text-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all" />
           </div>
-          {isOwner && (
+          {isOwner && !IMUS_ONLY && (
             <div>
               <label className="block text-xs font-medium text-brand-500 mb-1">Branch</label>
               <select value={filterBranch} onChange={e => setFilterBranch(e.target.value)}
@@ -356,7 +357,7 @@ export default function SalesPage() {
             <thead>
               <tr className="border-b border-brand-100/60 bg-surface-50">
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Receipt</th>
-                {isOwner && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
+                {isOwner && !IMUS_ONLY && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Customer</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Cashier</th>
                 <th className="text-right text-xs font-medium text-brand-400 px-5 py-3">Total</th>
@@ -370,7 +371,7 @@ export default function SalesPage() {
                 Array.from({ length: 8 }).map((_, i) => (
                   <tr key={i} className="border-b border-brand-100/30">
                     <td className="px-5 py-4"><Skeleton className="h-4 w-28 mb-1" /><Skeleton className="h-3 w-16" /></td>
-                    {isOwner && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
                     <td className="px-5 py-4"><Skeleton className="h-4 w-24" /></td>
                     <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>
                     <td className="px-5 py-4 text-right"><Skeleton className="h-4 w-20 ml-auto" /></td>
@@ -381,7 +382,7 @@ export default function SalesPage() {
                 ))
               ) : filteredSales.length === 0 ? (
                 <tr>
-                  <td colSpan={isOwner ? 8 : 7} className="text-center py-16 text-sm text-brand-400">
+                  <td colSpan={isOwner && !IMUS_ONLY ? 8 : 7} className="text-center py-16 text-sm text-brand-400">
                     <svg className="w-12 h-12 text-brand-200 mx-auto mb-3" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18.75a60.07 60.07 0 0115.797 2.101c.727.198 1.453-.342 1.453-1.096V18.75M3.75 4.5v.75A.75.75 0 013 6h-.75m0 0v-.375c0-.621.504-1.125 1.125-1.125H20.25M2.25 6v9m18-10.5v.75c0 .414.336.75.75.75h.75m-1.5-1.5h.375c.621 0 1.125.504 1.125 1.125v9.75c0 .621-.504 1.125-1.125 1.125h-.375m1.5-1.5H21a.75.75 0 00-.75.75v.75m0 0H3.75m0 0h-.375a1.125 1.125 0 01-1.125-1.125V15m1.5 1.5v-.75A.75.75 0 003 15h-.75M15 10.5a3 3 0 11-6 0 3 3 0 016 0zm3 0h.008v.008H18V10.5zm-12 0h.008v.008H6V10.5z" />
                     </svg>
@@ -394,7 +395,7 @@ export default function SalesPage() {
                     <td className="px-5 py-4">
                       <p className="text-xs font-mono font-medium text-brand-700">{s.receipt_number}</p>
                     </td>
-                    {isOwner && <td className="px-5 py-4"><span className="text-sm text-brand-500">{s.branch_name}</span></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><span className="text-sm text-brand-500">{s.branch_name}</span></td>}
                     <td className="px-5 py-4">
                       <span className="text-sm text-brand-700">{s.customer_name || <span className="text-brand-300">Walk-in</span>}</span>
                     </td>
