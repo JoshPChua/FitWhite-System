@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { Branch, UserRole } from '@/types/database';
+import { IMUS_ONLY } from '@/lib/feature-flags';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -449,7 +450,7 @@ export default function UsersPage() {
               <option value="cashier">Cashier</option>
             </select>
           </div>
-          {isOwner && (
+          {isOwner && !IMUS_ONLY && (
             <div>
               <label className="block text-xs font-medium text-brand-500 mb-1">Branch</label>
               <select
@@ -487,7 +488,7 @@ export default function UsersPage() {
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Staff</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Email</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Role</th>
-                {isOwner && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
+                {isOwner && !IMUS_ONLY && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Status</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Joined</th>
                 <th className="text-right text-xs font-medium text-brand-400 px-5 py-3">Actions</th>
@@ -500,7 +501,7 @@ export default function UsersPage() {
                     <td className="px-5 py-4"><div className="flex items-center gap-3"><Skeleton className="w-9 h-9 rounded-full" /><div><Skeleton className="h-4 w-28 mb-1" /><Skeleton className="h-3 w-16" /></div></div></td>
                     <td className="px-5 py-4"><Skeleton className="h-4 w-36" /></td>
                     <td className="px-5 py-4"><Skeleton className="h-5 w-16 rounded-full" /></td>
-                    {isOwner && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
                     <td className="px-5 py-4"><Skeleton className="h-5 w-14 rounded-full" /></td>
                     <td className="px-5 py-4"><Skeleton className="h-4 w-24" /></td>
                     <td className="px-5 py-4"><Skeleton className="h-4 w-16 ml-auto" /></td>
@@ -508,7 +509,7 @@ export default function UsersPage() {
                 ))
               ) : filteredUsers.length === 0 ? (
                 <tr>
-                  <td colSpan={isOwner ? 7 : 6} className="text-center py-16 text-sm text-brand-400">
+                  <td colSpan={isOwner && !IMUS_ONLY ? 7 : 6} className="text-center py-16 text-sm text-brand-400">
                     <svg className="w-12 h-12 text-brand-200 mx-auto mb-3" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
                     </svg>
@@ -549,7 +550,7 @@ export default function UsersPage() {
                       </Badge>
                     </td>
                     {/* Branch (Owner only) */}
-                    {isOwner && (
+                    {isOwner && !IMUS_ONLY && (
                       <td className="px-5 py-4">
                         <span className="text-sm text-brand-500">{u.branch_name}</span>
                       </td>

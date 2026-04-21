@@ -8,6 +8,7 @@ import {
   ENABLE_PATIENT_PACKAGES,
   ENABLE_DOCTOR_COMMISSIONS,
   ENABLE_SHIFTS,
+  IMUS_ONLY,
 } from '@/lib/feature-flags';
 import { downloadCsv, toCsv, csvCurrency, csvDate, type CsvColumn } from '@/lib/export-csv';
 
@@ -374,7 +375,7 @@ export default function ReportsPage() {
             ))}
           </div>
           {/* Branch filter (owner only) */}
-          {isOwner && (
+          {isOwner && !IMUS_ONLY && (
             <select value={filterBranch} onChange={e => setFilterBranch(e.target.value)}
               className="px-3 py-1.5 rounded-xl border border-brand-200 bg-white text-xs text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-400/50">
               <option value="">All branches</option>

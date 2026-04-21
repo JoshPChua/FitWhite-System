@@ -134,6 +134,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
+    // Force hard redirect to clear Next.js cached state
+    window.location.href = '/login';
   }, [supabase]);
 
   const role = profile?.role ?? null;

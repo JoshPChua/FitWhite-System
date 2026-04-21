@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
+import { IMUS_ONLY } from '@/lib/feature-flags';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -384,7 +385,7 @@ export default function InventoryPage() {
                          placeholder:text-brand-300 focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all"
             />
           </div>
-          {isOwner && (
+          {isOwner && !IMUS_ONLY && (
             <div>
               <label className="block text-xs font-medium text-brand-500 mb-1">Branch</label>
               <select
@@ -430,7 +431,7 @@ export default function InventoryPage() {
             <thead>
               <tr className="border-b border-brand-100/60 bg-surface-50">
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Product</th>
-                {isOwner && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
+                {isOwner && !IMUS_ONLY && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Category</th>
                 <th className="text-center text-xs font-medium text-brand-400 px-5 py-3">Qty</th>
                 <th className="text-center text-xs font-medium text-brand-400 px-5 py-3">Threshold</th>
@@ -444,7 +445,7 @@ export default function InventoryPage() {
                 Array.from({ length: 8 }).map((_, i) => (
                   <tr key={i} className="border-b border-brand-100/30">
                     <td className="px-5 py-4"><div><Skeleton className="h-4 w-40 mb-1" /><Skeleton className="h-3 w-16" /></div></td>
-                    {isOwner && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
                     <td className="px-5 py-4"><Skeleton className="h-5 w-20 rounded-full" /></td>
                     <td className="px-5 py-4 text-center"><Skeleton className="h-6 w-12 rounded-full mx-auto" /></td>
                     <td className="px-5 py-4 text-center"><Skeleton className="h-4 w-8 mx-auto" /></td>
@@ -456,7 +457,7 @@ export default function InventoryPage() {
               ) : filteredInventory.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={canManage ? (isOwner ? 8 : 7) : (isOwner ? 7 : 6)}
+                    colSpan={canManage ? (isOwner && !IMUS_ONLY ? 8 : 7) : (isOwner && !IMUS_ONLY ? 7 : 6)}
                     className="text-center py-16 text-sm text-brand-400"
                   >
                     <svg className="w-12 h-12 text-brand-200 mx-auto mb-3" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor">
@@ -485,7 +486,7 @@ export default function InventoryPage() {
                           <p className="text-xs font-mono text-brand-400 mt-0.5">{item.product_sku}</p>
                         )}
                       </td>
-                      {isOwner && (
+                      {isOwner && !IMUS_ONLY && (
                         <td className="px-5 py-4">
                           <span className="text-sm text-brand-500">{item.branch_name}</span>
                         </td>
