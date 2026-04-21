@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useState, useCallback, useRef, us
 import { createClient } from '@/lib/supabase/client';
 import type { User } from '@supabase/supabase-js';
 import type { Profile, Branch, UserRole } from '@/types/database';
+import { IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
 
 interface AuthContextType {
   user: User | null;
@@ -68,6 +69,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // Set default branch without clearing it if already chosen
         setSelectedBranch(prev => {
           if (prev) return prev; // keep existing selection
+
+          if (IMUS_ONLY) {
+            // In Imus-only mode, always default to the Imus branch
+            const imusBranch = branchData.find(b => b.code === IMUS_BRANCH_CODE);
+            return imusBranch ?? branchData[0] ?? null;
+          }
+
           if (profileData.role === 'owner') return branchData[0] ?? null;
           return branchData.find(b => b.id === profileData.branch_id) ?? null;
         });
