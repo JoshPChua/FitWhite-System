@@ -60,46 +60,22 @@ function isGroup(entry: NavEntry): entry is NavGroup {
 /**
  * Role-aware navigation builder.
  *
- * Owner sees the full structure with collapsible groups.
- * Manager and Cashier see the same simplified flat/short menu
- * (unified as "operational" role for sidebar purposes).
+ * Owner sees the full structure including Dashboard and Admin.
+ * Non-owner (manager/cashier — same role in the current auth model)
+ * sees the full operational toolset minus Dashboard and Admin > Users.
  */
 function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
-  const isOperational = role === 'manager' || role === 'cashier';
+  const isOwner = role === 'owner';
+  const nav: NavEntry[] = [];
 
-  // ─── Operational menu (Manager + Cashier) ───────────────
-  if (isOperational) {
-    const nav: NavEntry[] = [
-      { href: '/pos', label: 'POS', icon: ShoppingCart },
-      { href: '/customers', label: 'Customers', icon: Users },
-      { href: '/sales', label: 'Sales', icon: BadgeDollarSign },
-    ];
-
-    // Inventory group
-    const inventoryItems: NavItem[] = [
-      { href: '/inventory', label: 'Stock Levels', icon: Boxes },
-    ];
-    if (ENABLE_SERVICE_BOM) {
-      inventoryItems.push({ href: '/inventory-logs', label: 'Stock Logs', icon: ClipboardList });
-    }
-    nav.push({ id: 'inventory', label: 'Inventory', icon: Boxes, items: inventoryItems });
-
-    // Shifts (flat)
-    if (ENABLE_SHIFTS) {
-      nav.push({ href: '/shifts', label: 'Shifts', icon: Clock });
-    }
-
-    return nav;
+  // ─── Top-level items ──────────────────────────────────
+  if (isOwner) {
+    nav.push({ href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard });
   }
+  nav.push({ href: '/pos', label: 'POS', icon: ShoppingCart });
+  nav.push({ href: '/customers', label: 'Customers', icon: Users });
 
-  // ─── Owner menu ────────────────────────────────────────
-  const nav: NavEntry[] = [
-    { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/pos', label: 'POS', icon: ShoppingCart },
-    { href: '/customers', label: 'Customers', icon: Users },
-  ];
-
-  // Inventory
+  // ─── Inventory group ──────────────────────────────────
   const inventoryItems: NavItem[] = [
     { href: '/products', label: 'Products', icon: Package },
     { href: '/inventory', label: 'Stock Levels', icon: Boxes },
@@ -109,7 +85,7 @@ function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
   }
   nav.push({ id: 'inventory', label: 'Inventory', icon: Boxes, items: inventoryItems });
 
-  // Clinic
+  // ─── Clinic group ─────────────────────────────────────
   const clinicItems: NavItem[] = [
     { href: '/services', label: 'Services', icon: Syringe },
     { href: '/bundles', label: 'Bundles', icon: Gift },
@@ -119,7 +95,7 @@ function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
   }
   nav.push({ id: 'clinic', label: 'Clinic', icon: Stethoscope, items: clinicItems });
 
-  // Finance
+  // ─── Finance group ────────────────────────────────────
   const financeItems: NavItem[] = [
     { href: '/sales', label: 'Sales', icon: BadgeDollarSign },
   ];
@@ -129,18 +105,29 @@ function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
   financeItems.push({ href: '/reports', label: 'Reports', icon: BarChart3 });
   nav.push({ id: 'finance', label: 'Finance', icon: BadgeDollarSign, items: financeItems });
 
-  // Admin
-  const adminItems: NavItem[] = [
-    { href: '/users', label: 'Users', icon: UserCog },
-  ];
-  if (ENABLE_SHIFTS) {
-    adminItems.push({ href: '/shifts', label: 'Shifts', icon: Clock });
+  // ─── Admin group (Owner only) ─────────────────────────
+  if (isOwner) {
+    const adminItems: NavItem[] = [
+      { href: '/users', label: 'Users', icon: UserCog },
+    ];
+    if (ENABLE_SHIFTS) {
+      adminItems.push({ href: '/shifts', label: 'Shifts', icon: Clock });
+    }
+    adminItems.push({ href: '/audit-logs', label: 'Audit Logs', icon: FileText });
+    if (!IMUS_ONLY) {
+      adminItems.push({ href: '/branches', label: 'Branches', icon: Building2 });
+    }
+    nav.push({ id: 'admin', label: 'Admin', icon: Settings, items: adminItems });
   }
-  adminItems.push({ href: '/audit-logs', label: 'Audit Logs', icon: FileText });
-  if (!IMUS_ONLY) {
-    adminItems.push({ href: '/branches', label: 'Branches', icon: Building2 });
+
+  // ─── Non-owner top-level extras ───────────────────────
+  // Shifts and Audit Logs surface as flat items (not buried in Admin)
+  if (!isOwner) {
+    if (ENABLE_SHIFTS) {
+      nav.push({ href: '/shifts', label: 'Shifts', icon: Clock });
+    }
+    nav.push({ href: '/audit-logs', label: 'Audit Logs', icon: FileText });
   }
-  nav.push({ id: 'admin', label: 'Admin', icon: Settings, items: adminItems });
 
   return nav;
 }
