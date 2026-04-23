@@ -63,25 +63,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      // ─── Imus-only hard invariant ───────────────────────────
+      // When IMUS_ONLY is active, reduce the branch list to [Imus] only.
+      // This is the single point of enforcement — every downstream consumer
+      // (dropdowns, assignableBranches, customer defaults) sees only Imus.
+      const effectiveBranches = IMUS_ONLY
+        ? branchData.filter(b => b.code === IMUS_BRANCH_CODE)
+        : branchData;
+
       if (profileData) {
         setProfile(profileData);
 
         // Set default branch without clearing it if already chosen
         setSelectedBranch(prev => {
-          if (prev) return prev; // keep existing selection
+          if (prev && effectiveBranches.some(b => b.id === prev.id)) return prev;
 
           if (IMUS_ONLY) {
-            // In Imus-only mode, always default to the Imus branch
-            const imusBranch = branchData.find(b => b.code === IMUS_BRANCH_CODE);
-            return imusBranch ?? branchData[0] ?? null;
+            return effectiveBranches[0] ?? null;
           }
 
-          if (profileData.role === 'owner') return branchData[0] ?? null;
-          return branchData.find(b => b.id === profileData.branch_id) ?? null;
+          if (profileData.role === 'owner') return effectiveBranches[0] ?? null;
+          return effectiveBranches.find(b => b.id === profileData.branch_id) ?? null;
         });
       }
 
-      setBranches(branchData);
+      setBranches(effectiveBranches);
     } catch (err) {
       console.error('Auth bootstrap error:', err);
     } finally {

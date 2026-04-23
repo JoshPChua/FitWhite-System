@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 
@@ -11,6 +11,29 @@ export function LoginForm() {
   const [isLoading, setIsLoading] = useState(false);
   const router  = useRouter();
   const supabase = createClient();
+
+  // ─── Already-authenticated redirect ─────────────────────
+  // Since middleware no longer redirects authed users from /login,
+  // we handle it here with role-aware routing.
+  useEffect(() => {
+    const checkAuth = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single();
+
+      if (profile) {
+        const role = (profile as Record<string, unknown>).role as string;
+        router.replace(role === 'cashier' ? '/pos' : '/dashboard');
+      }
+    };
+    checkAuth();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

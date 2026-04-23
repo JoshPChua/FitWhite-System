@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { assertImusOnlyBranch, IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
 import type { Profile } from '@/types/database';
 
 /**
  * PATCH /api/users/[id] — Update a user's profile
  * Requires: owner or manager role
+ *
+ * Phase 4 enhancements:
+ *   - Imus-only guard on branch_id changes
+ *   - is_doctor / default_commission_rate support
  */
 export async function PATCH(
   request: NextRequest,
@@ -33,7 +38,7 @@ export async function PATCH(
     }
 
     const body = await request.json();
-    const { first_name, last_name, role, branch_id, is_active } = body;
+    const { first_name, last_name, role, branch_id, is_active, is_doctor, default_commission_rate } = body;
 
     // Managers can only update staff in their branch
     if (callerProfile.role === 'manager') {
@@ -58,6 +63,22 @@ export async function PATCH(
       }
     }
 
+    // ─── Imus-only guard on branch changes ──────────────────
+    if (branch_id && IMUS_ONLY) {
+      const adminClientForCheck = createAdminClient();
+      const { data: imusBranch } = await adminClientForCheck
+        .from('branches').select('id').eq('code', IMUS_BRANCH_CODE).single();
+      const imusBranchId = imusBranch ? (imusBranch as Record<string, unknown>).id as string : null;
+      try {
+        assertImusOnlyBranch(branch_id, imusBranchId);
+      } catch {
+        return NextResponse.json(
+          { error: 'This installation is restricted to the Imus branch' },
+          { status: 403 }
+        );
+      }
+    }
+
     // Prevent self-demotion for owner
     if (currentUser.id === userId && callerProfile.role === 'owner' && role && role !== 'owner') {
       return NextResponse.json({ error: 'Cannot demote yourself from owner role' }, { status: 400 });
@@ -69,6 +90,19 @@ export async function PATCH(
     if (role !== undefined) updateData.role = role;
     if (branch_id !== undefined) updateData.branch_id = branch_id;
     if (is_active !== undefined) updateData.is_active = is_active;
+
+    // Doctor fields
+    if (is_doctor !== undefined) updateData.is_doctor = !!is_doctor;
+    if (default_commission_rate !== undefined) {
+      // Normalize: if > 1, assume percentage input (e.g. 30 → 0.30)
+      if (default_commission_rate === null) {
+        updateData.default_commission_rate = null;
+      } else {
+        updateData.default_commission_rate = default_commission_rate > 1
+          ? default_commission_rate / 100
+          : default_commission_rate;
+      }
+    }
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 });

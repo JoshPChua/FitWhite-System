@@ -936,7 +936,7 @@ export default function POSPage() {
 
               <button
                 onClick={handleCheckout}
-                disabled={isProcessing || totalPaid < total - 0.01}
+                disabled={isProcessing || (paymentType === 'full' && totalPaid < total - 0.01) || (paymentType === 'installment' && totalPaid < 0.01)}
                 className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 text-white font-semibold
                            hover:from-emerald-700 hover:to-emerald-800 active:scale-[0.99] transition-all shadow-sm hover:shadow-md
                            disabled:opacity-50 disabled:cursor-not-allowed text-base"

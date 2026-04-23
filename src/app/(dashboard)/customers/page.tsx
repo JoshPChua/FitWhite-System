@@ -203,7 +203,7 @@ export default function CustomersPage() {
     setFormMode('create');
     setEditingCustomer(null);
     setFormData({
-      branch_id: isManager ? (selectedBranch?.id || '') : (branches[0]?.id || ''),
+      branch_id: selectedBranch?.id || '',
       first_name: '', last_name: '', email: '', phone: '', allergies: '', notes: '',
     });
     setFormError(''); setFormSuccess('');
@@ -244,19 +244,27 @@ export default function CustomersPage() {
       };
 
       if (formMode === 'create') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { error } = await (supabase as any)
-          .from('customers')
-          .insert({ ...payload, branch_id: formData.branch_id });
-        if (error) { setFormError(error.message); return; }
+        const res = await fetch('/api/customers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...payload,
+            // In IMUS_ONLY, server ignores this and resolves Imus branch.
+            // In multi-branch, server validates this.
+            branch_id: formData.branch_id,
+          }),
+        });
+        const result = await res.json();
+        if (!res.ok) { setFormError(result.error || 'Failed to register patient'); return; }
         setFormSuccess(`${formData.first_name} ${formData.last_name} registered`);
       } else if (editingCustomer) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const { error } = await (supabase as any)
-          .from('customers')
-          .update(payload)
-          .eq('id', editingCustomer.id);
-        if (error) { setFormError(error.message); return; }
+        const res = await fetch(`/api/customers/${editingCustomer.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const result = await res.json();
+        if (!res.ok) { setFormError(result.error || 'Failed to update patient'); return; }
         setFormSuccess(`Profile updated`);
       }
 
@@ -274,8 +282,9 @@ export default function CustomersPage() {
     if (!deleteTarget) return;
     setIsDeleting(true);
     try {
-      const { error } = await supabase.from('customers').delete().eq('id', deleteTarget.id);
-      if (error) { alert(error.message); return; }
+      const res = await fetch(`/api/customers/${deleteTarget.id}`, { method: 'DELETE' });
+      const result = await res.json();
+      if (!res.ok) { alert(result.error || 'Failed to delete patient'); return; }
       await fetchCustomers();
       setDeleteTarget(null);
     } catch (err) {

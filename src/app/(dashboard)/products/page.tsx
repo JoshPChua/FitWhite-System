@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
+import { IMUS_ONLY } from '@/lib/feature-flags';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -383,7 +384,7 @@ export default function ProductsPage() {
             <thead>
               <tr className="border-b border-brand-100/60 bg-surface-50">
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Product</th>
-                {isOwner && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
+                {isOwner && !IMUS_ONLY && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">SKU</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Category</th>
                 <th className="text-right text-xs font-medium text-brand-400 px-5 py-3">Price</th>
@@ -397,7 +398,7 @@ export default function ProductsPage() {
                 Array.from({ length: 6 }).map((_, i) => (
                   <tr key={i} className="border-b border-brand-100/30">
                     <td className="px-5 py-4"><div><Skeleton className="h-4 w-36 mb-1" /><Skeleton className="h-3 w-20" /></div></td>
-                    {isOwner && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><Skeleton className="h-4 w-20" /></td>}
                     <td className="px-5 py-4"><Skeleton className="h-4 w-16" /></td>
                     <td className="px-5 py-4"><Skeleton className="h-5 w-20 rounded-full" /></td>
                     <td className="px-5 py-4 text-right"><Skeleton className="h-4 w-16 ml-auto" /></td>
@@ -409,7 +410,7 @@ export default function ProductsPage() {
               ) : filteredProducts.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={canManage ? (isOwner ? 8 : 7) : (isOwner ? 7 : 6)}
+                    colSpan={canManage ? (isOwner && !IMUS_ONLY ? 8 : 7) : (isOwner && !IMUS_ONLY ? 7 : 6)}
                     className="text-center py-16 text-sm text-brand-400"
                   >
                     <svg className="w-12 h-12 text-brand-200 mx-auto mb-3" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor">
@@ -425,7 +426,7 @@ export default function ProductsPage() {
                       <p className="text-sm font-medium text-brand-800">{p.name}</p>
                       <p className="text-xs text-brand-400 mt-0.5">{p.unit}</p>
                     </td>
-                    {isOwner && <td className="px-5 py-4"><span className="text-sm text-brand-500">{p.branch_name}</span></td>}
+                    {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><span className="text-sm text-brand-500">{p.branch_name}</span></td>}
                     <td className="px-5 py-4">
                       <span className="text-xs font-mono text-brand-500">{p.sku || '—'}</span>
                     </td>
@@ -527,7 +528,7 @@ export default function ProductsPage() {
           )}
 
           {/* Branch (Owner only, create) */}
-          {isOwner && formMode === 'create' && (
+          {isOwner && !IMUS_ONLY && formMode === 'create' && (
             <div>
               <label className="block text-sm font-medium text-brand-800 mb-1.5">Branch</label>
               <select

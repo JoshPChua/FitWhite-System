@@ -1,78 +1,158 @@
 # FitWhite Aesthetics — POS & Clinic Management System
 
-> A multi-branch Point-of-Sale and clinic management platform built for **FitWhite Aesthetics** salons and clinics.  
-> Built with **Next.js 15**, **Supabase (PostgreSQL)**, **TailwindCSS v4**, deployed on **Vercel + Railway**.
+> A multi-branch Point-of-Sale and clinic management platform built for **FitWhite Aesthetics**.  
+> Built with **Next.js 16**, **Supabase (PostgreSQL)**, **TailwindCSS v4**, deployed on **Vercel + Supabase Cloud**.
 
 ---
 
 ## Table of Contents
 
-1. [Features](#features)
-2. [Tech Stack](#tech-stack)
-3. [Architecture Overview](#architecture-overview)
-4. [Getting Started (Local Dev)](#getting-started-local-dev)
-5. [Environment Variables](#environment-variables)
-6. [Default Login Credentials](#default-login-credentials)
-7. [Database & Supabase Guide](#database--supabase-guide)
-8. [Security](#security)
-9. [Performance & Scalability](#performance--scalability)
-10. [Commercial Readiness Checklist](#commercial-readiness-checklist)
-11. [FAQ for the Owner / Business](#faq-for-the-owner--business)
-12. [Developer Notes](#developer-notes)
+1. [Deployment Topology](#deployment-topology)
+2. [Features](#features)
+3. [Imus-Only Mode](#imus-only-mode)
+4. [Feature Flags](#feature-flags)
+5. [Tech Stack](#tech-stack)
+6. [Architecture Overview](#architecture-overview)
+7. [Getting Started (Local Dev)](#getting-started-local-dev)
+8. [Environment Variables](#environment-variables)
+9. [Database & Supabase Guide](#database--supabase-guide)
+10. [Security](#security)
+11. [Smoke-Test Checklist](#smoke-test-checklist)
+12. [FAQ for the Owner / Business](#faq-for-the-owner--business)
+13. [Developer Notes](#developer-notes)
+
+---
+
+## Deployment Topology
+
+```
+┌──────────────────────────────────────────────┐
+│  Vercel (Frontend + API Routes)              │
+│  ├─ Next.js App Router (SSR + Edge)          │
+│  └─ /api/* route handlers (serverless)       │
+│       ← all business logic lives here        │
+└──────────────┬───────────────────────────────┘
+               │ HTTPS
+┌──────────────▼───────────────────────────────┐
+│  Supabase Cloud (Database + Auth)            │
+│  ├─ PostgreSQL 15 (tables, RLS, enums)       │
+│  ├─ Supabase Auth (JWT, user management)     │
+│  └─ Auto-generated REST API (used by client) │
+└──────────────────────────────────────────────┘
+```
+
+- **Source of business logic:** Next.js route handlers in `src/app/api/*`
+- **Data layer:** Supabase PostgreSQL with Row-Level Security (RLS)
+- **Auth:** Supabase Auth (JWT). Service-role admin client used only server-side.
 
 ---
 
 ## Features
 
 ### Point of Sale (POS)
-- **Multi-item cart** — add services, products, and bundles in a single transaction
-- **Real-time catalog** with category filters and search
-- **Split payments** — mix Cash, GCash, Card, and Bank Transfer in one checkout
-- **Live stock enforcement** — products capped at remaining inventory (client + server-side)
-- **Discounts** — flat ₱ amount or % off the subtotal
-- **Customer lookup** — attach an existing patient record to the sale
-- **Digital receipt** — shown on screen after every successful sale; printable
-- **Server-side price verification** — client prices are **never trusted**; all amounts are re-fetched from the database at checkout
+- Multi-item cart (services, products, bundles)
+- Real-time catalog with category filters and search
+- Split payments (Cash, GCash, Card, Bank Transfer)
+- Live stock enforcement (client + server-side)
+- Discounts (flat ₱ or %)
+- Customer/patient lookup and allergy warnings
+- Digital receipt after every sale
+- **Server-side price verification** — client prices are never trusted
+- **Installment/Package sales** — partial payment creates patient packages for multi-session services
+- **Doctor commission tracking** — attending doctor selected at POS, commissions computed automatically
+
+### Patient Packages
+- Auto-created from installment sales
+- Session tracking (used / remaining)
+- Follow-up payments with ledger history
+- Package expiration and cancellation
+
+### Shifts & Cash Drawer
+- Open/close shifts with opening cash declaration
+- Cash movement tracking (petty cash, bank deposits)
+- End-of-shift variance calculation
+
+### Service BOM (Bill of Materials)
+- Assign consumable products to services
+- Automatic inventory deduction at checkout
+- Race-condition detection with compensating rollback
 
 ### Inventory Management
-- Per-branch product stock tracking
-- Automated stock deduction on every sale
-- Manual stock adjustment with audit trail
-- Low-stock indicators on product cards (≤5 units → red)
+- Per-branch stock tracking
+- Automated deduction on sales + BOM
+- Manual adjustments with audit trail
+- Low-stock indicators (≤5 units → red)
+- Canonical `inventory_logs` table for all stock movements
 
 ### Customer (Patient) Management
-- Create, search, and view patient records
-- Store allergy notes (shown as a warning during checkout)
-- Store credit balance
+- Server-side CRUD via `/api/customers`
+- Branch-restricted (managers cannot cross-branch)
+- Allergy notes, store credit, treatment history
 
 ### Multi-Branch Management
-- Unlimited branches (Owner-controlled)
-- Each branch has its own: staff, services, products, inventory, customers, and sales
-- Branch codes used in receipt numbers (e.g., `MKT-20240410-0012`)
-- Owner can view all branches in a single dashboard
-- Managers and cashiers are restricted to their assigned branch
+- Per-branch: staff, services, products, inventory, customers, sales
+- Branch codes in receipt numbers (e.g., `IMS-20240410-0012`)
+- Owner sees all branches; managers/cashiers restricted to their branch
 
 ### User & Role Management
 - **Owner** — full system access across all branches
-- **Manager** — full access within their branch; restricted cross-branch reporting
-- **Cashier** — POS access only; cannot view reports or manage users
+- **Manager** — full access within their branch only
+- **Cashier** — POS access only
+- **Doctor flag** — mark staff as doctors for commission tracking
+- Default commission rate per doctor
+
+### Doctor Commissions
+- Automatic commission calculation on service sales
+- Per-sale-item granularity
+- Configurable commission rate per doctor
+- Commission dashboard with payment tracking
 
 ### Dashboard & Analytics
 - Sales summary (daily/weekly/monthly)
 - Revenue breakdown by branch
 - Inventory alerts
-- Audit log of all system actions
+- Full audit log of all system actions
 
-### Audit Logging
-- Every sale, refund, void, user change, and stock adjustment is logged
-- Logs include: who did it, when, on which branch, with what data
+### Void & Refund
+- **Full void reversal** — restores product inventory, reverses BOM deductions, cancels packages, deletes commissions
+- Partial refund with inventory return option
 
-### Security
-- Server-side Row-Level Security (RLS) on all tables via Supabase
-- JWT-based authentication (Supabase Auth)
-- All API routes validate the caller's identity before executing
-- Price, item name, and stock are all verified server-side at checkout
-- Service-role admin client used only in server-side API routes (never exposed to the browser)
+---
+
+## Imus-Only Mode
+
+The system supports a **single-branch lockdown** for deployments that serve only one location.
+
+When `NEXT_PUBLIC_IMUS_ONLY=true`:
+
+| Behavior | Effect |
+|---|---|
+| `branches` array | Filtered to `[imusBranch]` at the provider level |
+| Branch selectors | Hidden across all pages (POS, Users, Customers) |
+| API routes | `assertImusOnlyBranch()` rejects non-Imus `branch_id` values |
+| Customer creation | Server-side route ignores client `branch_id`, resolves Imus automatically |
+| User creation | `branch_id` auto-assigned to Imus for managers in Imus-only mode |
+
+**Limitations:**
+- This is an application-level enforcement, not an RLS-level restriction (yet)
+- The Imus branch must exist in the `branches` table with code `IMS`
+- Switching to multi-branch requires removing the env var and redeploying
+
+---
+
+## Feature Flags
+
+All feature flags are environment variables set in `.env.local` (or Vercel project settings).
+
+| Variable | Default | Description |
+|---|---|---|
+| `NEXT_PUBLIC_IMUS_ONLY` | `false` | Lock to Imus branch only (see above) |
+| `NEXT_PUBLIC_ENABLE_PATIENT_PACKAGES` | `true` | Patient package / session tracking module |
+| `NEXT_PUBLIC_ENABLE_SHIFTS` | `true` | Shift / cash drawer management |
+| `NEXT_PUBLIC_ENABLE_DOCTOR_COMMISSIONS` | `true` | Doctor commission tracking and UI |
+| `NEXT_PUBLIC_ENABLE_SERVICE_BOM` | `true` | Service BOM consumable deduction at checkout |
+
+Flags default to `true` once Phase 3+ migrations are applied. Set to `'false'` to disable.
 
 ---
 
@@ -80,13 +160,12 @@
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js 15 (App Router, TypeScript) |
+| Frontend | Next.js 16 (App Router, TypeScript) |
 | Styling | TailwindCSS v4, Google Fonts (Inter + Playfair Display) |
 | Backend API | Next.js API Routes (serverless) |
 | Database | Supabase (PostgreSQL 15) |
 | Auth | Supabase Auth (JWT) |
-| Hosting — Frontend | Vercel (auto-deploy from GitHub) |
-| Hosting — Backend API | Railway (optional separate deployment) |
+| Hosting | Vercel (auto-deploy from GitHub) |
 | Time Zone | Philippine Standard Time (PHT / UTC+8) |
 
 ---
@@ -97,25 +176,26 @@
 Browser (Next.js Client)
     │
     ├─ useAuth() provider ─── Supabase Auth (JWT session)
+    │       └─ branches[] filtered by IMUS_ONLY at source
     │
     └─ /api/* routes (Next.js Server)
             │
-            ├─ createClient()      ← uses user's JWT (for RLS enforcement)
-            └─ createAdminClient() ← uses service_role key (bypasses RLS, for writes)
+            ├─ createClient()      ← user's JWT (RLS enforcement)
+            └─ createAdminClient() ← service_role key (bypasses RLS)
                         │
                         └─ Supabase PostgreSQL
-                                ├─ branches
-                                ├─ profiles
-                                ├─ services
-                                ├─ products
-                                ├─ inventory
-                                ├─ customers
-                                ├─ sales + sale_items
-                                ├─ payments
+                                ├─ branches, profiles
+                                ├─ services, products, bundles
+                                ├─ inventory, inventory_logs
+                                ├─ customers, treatment_history
+                                ├─ sales, sale_items, payments
+                                ├─ patient_packages, package_payments, package_sessions
+                                ├─ shifts, cash_movements
+                                ├─ doctor_commissions
+                                ├─ service_consumables
                                 ├─ stock_adjustments
-                                ├─ bundles + bundle_items
-                                ├─ audit_logs
-                                └─ (RLS policies on all tables)
+                                ├─ refunds, refund_items
+                                └─ audit_logs
 ```
 
 ---
@@ -124,7 +204,7 @@ Browser (Next.js Client)
 
 ### Prerequisites
 - Node.js 18+
-- A Supabase project (free tier works)
+- A Supabase project (free tier works for dev)
 
 ### Steps
 
@@ -134,11 +214,14 @@ npm install
 
 # 2. Copy and fill in environment variables
 cp .env.example .env.local
-# → Edit .env.local with your Supabase keys
+# → Edit .env.local with your Supabase keys + feature flags
 
-# 3. Initialize the database (run in Supabase SQL Editor)
+# 3. Initialize the database (run in Supabase SQL Editor, in order)
 #    supabase/migrations/001_schema.sql
 #    supabase/migrations/002_rls_policies.sql
+#    supabase/migrations/003_phase3_schema.sql
+#    supabase/migrations/004_phase3_rls.sql
+#    supabase/migrations/005_add_void_reversal_source.sql
 
 # 4. Create the seed auth users
 npx ts-node scripts/seed-auth-users.ts
@@ -159,14 +242,17 @@ Open [http://localhost:3000](http://localhost:3000).
 Create a `.env.local` file (copy from `.env.example`):
 
 ```env
-# Supabase project URL
+# Supabase
 NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
-
-# Supabase anon key (safe to expose to the browser)
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
-
-# Supabase service_role key (NEVER expose to the browser — server-only)
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
+
+# Feature Flags
+NEXT_PUBLIC_IMUS_ONLY=true
+NEXT_PUBLIC_ENABLE_PATIENT_PACKAGES=true
+NEXT_PUBLIC_ENABLE_SHIFTS=true
+NEXT_PUBLIC_ENABLE_DOCTOR_COMMISSIONS=true
+NEXT_PUBLIC_ENABLE_SERVICE_BOM=true
 ```
 
 > **IMPORTANT:** `SUPABASE_SERVICE_ROLE_KEY` must NEVER be used in any `'use client'` file.
@@ -174,226 +260,131 @@ SUPABASE_SERVICE_ROLE_KEY=eyJ...
 
 ---
 
-## Default Login Credentials
-
-| Role | Email / Username | Password |
-|---|---|---|
-| Owner | `admin` | `admin123` |
-| Manager | `manager_{code}` | `manager_{code}123` |
-| Cashier | `cashier_{code}` | `cashier_{code}123` |
-
-**Branch codes:** `IMS`, `PSY`, `MNL`, `MKT`, `ILO`, `BCL`, `DVO`, `CLB`, `PRQ`, `QC`, `BCR`
-
-Example: Manager of Makati = email `manager_mkt`, password `manager_mkt123`
-
-> ⚠️ **Change all default passwords before going live with real customers.**
-
----
-
 ## Database & Supabase Guide
 
-### Do I need to manually create tables?
+### Migrations
 
-**No — not if you use the migration files.**  
-Run the SQL files provided in the `supabase/migrations/` folder in the Supabase SQL Editor (in order).  
-They create every table, index, function, and trigger the system needs.
+Run the SQL files in `supabase/migrations/` in the Supabase SQL Editor, **in order**.
+They create every table, index, function, trigger, and RLS policy the system needs.
 
-### What is Supabase?
-
-Supabase is a cloud-hosted PostgreSQL database with extras:
-- **Auth** — login system, JWT tokens
-- **RLS (Row-Level Security)** — database-level access control (like a firewall per row)
-- **APIs** — automatically generated REST and real-time APIs
-- **SQL Editor** — you can run SQL directly in the browser
-
-Think of it as "Google Sheets in the cloud, but for professional apps, and extremely secure."
-
-### Do I need to back up manually?
-
-Supabase Pro plan and above includes **automated daily backups with Point-in-Time Recovery**.  
-The free tier does **not** include automatic backups — you should either:
-1. Upgrade to Supabase Pro (recommended for production), or
-2. Set up a daily `pg_dump` export via a cron job
-
-For a business doing real sales, **upgrade to Pro (≈$25/month)** — this includes:
-- Automated daily backups (7-day retention)
-- Point-in-Time Recovery
-- Better performance limits
+| Migration | Description |
+|---|---|
+| `001_schema.sql` | Core tables (branches, profiles, services, products, etc.) |
+| `002_rls_policies.sql` | Row-Level Security policies |
+| `003_phase3_schema.sql` | Phase 3 tables (packages, shifts, commissions, BOM) |
+| `004_phase3_rls.sql` | Phase 3 RLS policies |
+| `005_add_void_reversal_source.sql` | `void_reversal` enum value for inventory logs |
 
 ### Table Summary
 
-| Table | What it stores |
+| Table | Description |
 |---|---|
-| `branches` | All clinic/salon locations |
-| `profiles` | Staff accounts and their roles |
-| `services` | Menu of treatments per branch |
+| `branches` | Clinic/salon locations |
+| `profiles` | Staff accounts, roles, doctor flag |
+| `services` | Treatment menu per branch |
 | `products` | Retail products per branch |
-| `bundles` | Package deals |
-| `inventory` | Stock levels per product per branch |
-| `customers` | Patient records |
-| `sales` | Sale header (total, receipt number, etc.) |
-| `sale_items` | Line items per sale |
-| `payments` | Payment breakdown per sale (cash/GCash/etc.) |
-| `stock_adjustments` | History of all inventory changes |
+| `bundles` / `bundle_items` | Package deals |
+| `inventory` / `inventory_logs` | Stock levels + full change history |
+| `service_consumables` | BOM: which products a service consumes |
+| `customers` | Patient records (allergies, notes, credit) |
+| `sales` / `sale_items` / `payments` | Transaction data |
+| `patient_packages` / `package_payments` / `package_sessions` | Multi-session service packages |
+| `shifts` / `cash_movements` | Cash drawer management |
+| `doctor_commissions` | Commission tracking per doctor per service |
+| `stock_adjustments` | Legacy inventory change log |
+| `refunds` / `refund_items` | Refund records |
 | `audit_logs` | Full system audit trail |
 
 ---
 
 ## Security
 
-### What protection do we have?
-
-| Threat | How We Protect Against It |
+| Threat | Protection |
 |---|---|
-| **Unauthorized access** | Supabase JWT authentication — you must login to use the system |
-| **Price/item tampering** | All prices and item names are re-verified server-side at checkout; the browser can't fake them |
-| **Cross-branch data theft** | RLS policies on every table; cashiers and managers can only see their own branch's data |
-| **Admin endpoint abuse** | Service role key only used server-side; never sent to the browser |
-| **Injection attacks** | Supabase client uses parameterized queries — SQL injection is not possible via the API |
-| **Session hijacking** | JWT tokens expire; Supabase handles refresh token rotation |
-
-### What about DDoS attacks?
-
-- **Vercel** (where the frontend lives) has built-in DDoS mitigation at the CDN level. Large DDoS attacks are absorbed before they reach your code.
-- **Supabase** has connection pooling and rate limiting, which protects the database from being overwhelmed.
-- For a small to medium business, you are **well-protected** on both Vercel and Supabase's infrastructure — they run the same protection that large companies use.
-- For enterprise-level protection (e.g., Cloudflare in front), this can be added later if needed, but is not required at the clinic scale.
-
-### What about malware?
-
-- The system runs in the cloud — there is no software installed on staff computers (just a browser). Malware on an individual PC cannot directly access or corrupt the database.
-- Supabase database is not directly accessible from the internet without credentials — it only accepts connections from your app.
-- Staff login credentials are the main risk. Ensure staff use strong passwords and do not share them.
-
-### Recommended security practices
-
-1. Change all default passwords before going live
-2. Use company email addresses for staff (not personal)
-3. Revoke access immediately when a staff member leaves
-4. Enable **2FA (Two-Factor Authentication)** on the Supabase dashboard account
-5. Never share the `SUPABASE_SERVICE_ROLE_KEY` with anyone
+| Unauthorized access | Supabase JWT authentication |
+| Price/item tampering | Server-side price re-verification at checkout |
+| Cross-branch data leak | Imus-only branch filtering + manager-branch restrictions |
+| Admin endpoint abuse | Service role key server-side only |
+| SQL injection | Supabase parameterized queries |
+| Session hijacking | JWT expiry + refresh token rotation |
+| BOM oversell race | Negative-stock detection + full sale rollback |
 
 ---
 
-## Performance & Scalability
+## Smoke-Test Checklist
 
-### How fast is the checkout?
+Before deploying to production, verify each flow manually:
 
-After the optimization in this update:
-- **Before:** 5–10 seconds (item DB lookups were sequential — one at a time)
-- **After:** 1–3 seconds (all item lookups now run in parallel with `Promise.all`)
+### Checkout
+- [ ] Full payment (services + products) — verify receipt, inventory deducted
+- [ ] Installment payment — verify patient package created with correct pro-rata downpayment
+- [ ] Multi-package checkout — verify allocations sum to exact `totalPaid` (no ledger drift)
+- [ ] Doctor commission — verify commission rows created with correct rate × gross amount
+- [ ] BOM deduction — verify consumable products deducted from inventory on service sale
 
-The remaining 1–2 seconds are the actual DB write operations (which are harder to parallelize safely).  
-For a clinic with a typical cart of 2–5 items, **1–3 seconds is acceptable and normal** for a secure, server-verified checkout.
+### Void
+- [ ] Void a sale with products — verify inventory restored
+- [ ] Void a sale with BOM services — verify consumable inventory restored
+- [ ] Void a sale that created packages — verify packages cancelled, package_payments deleted
+- [ ] Void a sale with doctor commissions — verify commission rows deleted
 
-### How long can the database last with 100,000 sales per day?
+### Refund
+- [ ] Partial refund — verify correct amount returned
+- [ ] Refund with inventory return — verify stock restored
 
-#### Storage estimate per sale:
-| Data | Approximate size |
-|---|---|
-| Sale header row | ~500 bytes |
-| 3 sale items (avg) | ~900 bytes |
-| 1–2 payments | ~400 bytes |
-| Audit log entry | ~500 bytes |
-| **Total per sale** | **~2,300 bytes (~2.3 KB)** |
+### User Management
+- [ ] Create staff in Imus-only mode — branch auto-assigned, no branch selector visible
+- [ ] Mark staff as doctor — set commission rate, verify shows in POS doctor dropdown
+- [ ] Manager cannot create users in another branch
 
-#### At 100,000 sales/day per branch:
-| Timeframe | Data generated |
-|---|---|
-| Per day | ~230 MB |
-| Per month | ~7 GB |
-| Per year | ~84 GB |
+### Customer Management
+- [ ] Create patient in Imus-only mode — branch auto-assigned server-side
+- [ ] Manager cannot create customers in another branch
+- [ ] Update patient details via server API
 
-#### Supabase limits:
-| Plan | Storage Included | Monthly Cost |
-|---|---|---|
-| Free | 500 MB total | $0 |
-| Pro | 8 GB included (+ $0.125/GB after) | ~$25/month |
-| Team | 100 GB | ~$599/month |
-
-**Realistic assessment at 100K sales/day:**
-- Free tier: would fill up in **~2 days**. Not suitable.
-- Pro tier: initial 8 GB fills in ~35 days; after that, you pay ~$0.125/GB extra. At 7 GB/month, that's ~$0.875/month extra = ~$26/month total. Very affordable.
-- **Recommendation:** For 100K daily sales, **Pro plan is sufficient** for at least 2–3 years. Beyond that, you can either pay for extra storage or archive old data.
-
-#### What to do in the future:
-1. **Archive old sales** — after 1–2 years, move old sales data to a separate "archive" table or export to CSV
-2. **Database indexes** — already set up; keep monitoring query performance in Supabase's dashboard
-3. **Read replicas** — Supabase Pro supports read replicas for high-load reporting queries
-
----
-
-## Commercial Readiness Checklist
-
-Before going live with real customers, verify:
-
-- [ ] All default passwords changed
-- [ ] Supabase upgraded to **Pro plan** (for backups + higher limits)
-- [ ] `.env.local` variables configured correctly on Vercel (not just locally)
-- [ ] All branches seeded correctly with their menus
-- [ ] Receipt numbers tested to be unique
-- [ ] Checkout tested end-to-end with a real GCash/card payment
-- [ ] Staff trained on the POS flow
-- [ ] A browser bookmark saved on each cashier's computer pointing to the production URL
-- [ ] Sign-out tested — staff should sign out at end of shift
-
-### Known Pending Items (for future dev work)
-- Bundle checkout (API scaffolded, UI complete — needs bundle DB records)
-- Refund/void flow (API exists, needs UI)
-- Staff scheduling module (not yet built)
-- SMS/email receipt notification
-- Customer loyalty/points system
+### Login
+- [ ] Cashier login → redirects to `/pos` (not `/dashboard`)
+- [ ] Owner login → redirects to `/dashboard`
+- [ ] Already-authenticated user on `/login` → auto-redirected by role
 
 ---
 
 ## FAQ for the Owner / Business
 
 **Q: If the internet goes down, can we still use the system?**  
-A: No — the system requires internet to communicate with the Supabase cloud database. A Wi-Fi/LTE backup connection is recommended at each branch.
+A: No — the system requires internet. A Wi-Fi/LTE backup is recommended.
 
-**Q: Can staff access it from their phones?**  
-A: Yes — the system is web-based and works on any modern browser including mobile. It is optimized for desktop/tablet use at the counter but is accessible on mobile.
+**Q: Can staff use their phones?**  
+A: Yes — web-based, works on any modern browser. Optimized for desktop/tablet.
 
 **Q: What happens if Supabase goes down?**  
-A: Supabase has a 99.9% uptime SLA on paid plans. If it does go down, the system will be unavailable until they restore it. This is rare (a few minutes per year). For absolute uptime guarantees, a self-hosted PostgreSQL could be considered in the future.
+A: Supabase has 99.9% uptime SLA on paid plans. Downtime is rare (minutes/year).
 
-**Q: Do I need a developer to maintain this day-to-day?**  
-A: No. Once deployed, the system runs on its own. You only need a developer to add new features, fix bugs, or change the menu/services.
-
-**Q: How do I add a new branch?**  
-A: Currently, the "Add Branch" button is available to developers via a feature flag. You only need to ask your developer, and they can add a new branch in minutes. This was done intentionally so branches cannot be accidentally created from the owner dashboard.
+**Q: Do I need a developer day-to-day?**  
+A: No. The system runs on its own. You only need a developer for new features or bug fixes.
 
 ---
 
 ## Developer Notes
 
-### Re-enabling "Add Branch" button
+### Business Logic Location
 
-In `src/app/(dashboard)/branches/page.tsx`, find this line near the top:
+All server-side business logic is in `src/app/api/*` route handlers. The client (browser) never writes directly to sensitive tables — all mutations go through these routes.
 
-```ts
-const ALLOW_UI_ADD_BRANCH = false;
-```
-
-Change it to `true` and redeploy. The full form and API remain intact.
+Key routes:
+- `POST /api/sales/checkout` — sale creation, inventory deduction, BOM, commissions, packages
+- `POST /api/sales/[id]/void` — full void reversal with compensating cleanup
+- `POST /api/users` — staff creation with Imus-only guard
+- `POST /api/customers` — patient creation with branch enforcement
 
 ### Time Zone
 
-The header shows live **Philippine Time (PHT / UTC+8)** using the `Asia/Manila` timezone, updated every second.  
-All receipts and timestamps use `en-PH` locale.
+All timestamps use **Philippine Standard Time (PHT / UTC+8)** via the `Asia/Manila` timezone.
+Receipts and UI timestamps use `en-PH` locale.
 
 ### Checkout Performance
 
-Checkout now uses `Promise.all` to verify all cart items and inventory simultaneously (parallel), instead of one-by-one (sequential).  
-This reduced typical checkout time from 5–10s → 1–3s.
-
-### Adding Bundle Checkout Support
-
-In `src/app/api/sales/checkout/route.ts`, find the comment:
-```
-// bundles: extend here when bundle table is fully implemented
-```
-Add a `bundle` case in the `itemLookupResults` `Promise.all` block, similar to the service/product cases.
+Checkout uses `Promise.all` for parallel item verification, reducing typical checkout from 5–10s → 1–3s.
 
 ---
 

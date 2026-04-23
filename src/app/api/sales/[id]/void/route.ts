@@ -6,11 +6,15 @@ import type { Profile } from '@/types/database';
 /**
  * POST /api/sales/[id]/void
  *
- * Security fix applied:
- *   [P1] Partial-refund sales can no longer be voided. This prevents
- *        double-restocking — inventory was already partially returned during
- *        the refund flow, and a void would return it all again.
- *        A partial-refund sale must be fully refunded first.
+ * Full void reversal — reverses ALL side effects of a completed sale:
+ *   1. Restore product inventory (direct sales)
+ *   2. Reverse service BOM consumable deductions
+ *   3. Cancel patient packages + delete auto-created package_payments
+ *   4. Delete doctor commissions
+ *
+ * Security:
+ *   - Partial-refund sales cannot be voided (inventory already partially returned)
+ *   - Only 'completed' sales can be voided
  */
 export async function POST(
   request: NextRequest,
@@ -47,7 +51,7 @@ export async function POST(
       return NextResponse.json({ error: 'Cannot void sales from another branch' }, { status: 403 });
     }
 
-    // ─── [P1 FIX] Block voiding of already-refunded states ──
+    // ─── Block voiding of already-processed states ──────────
     if (sale.status === 'voided') {
       return NextResponse.json({ error: 'Sale is already voided' }, { status: 400 });
     }
@@ -71,15 +75,16 @@ export async function POST(
 
     if (voidError) return NextResponse.json({ error: voidError.message }, { status: 500 });
 
-    // Restore inventory for ALL product items (no prior partial restock since
-    // we only allow voiding of 'completed' sales now)
+    // ─── 1. Restore product inventory ───────────────────────
     const { data: saleItems } = await adminClient
       .from('sale_items')
-      .select('product_id, quantity, name')
-      .eq('sale_id', saleId)
-      .eq('item_type', 'product');
+      .select('id, product_id, service_id, quantity, name, item_type')
+      .eq('sale_id', saleId);
 
-    for (const item of (saleItems || []) as Record<string, unknown>[]) {
+    const allSaleItems = (saleItems || []) as Record<string, unknown>[];
+    const productSaleItems = allSaleItems.filter(si => si.item_type === 'product');
+
+    for (const item of productSaleItems) {
       const { data: inv } = await adminClient
         .from('inventory')
         .select('id, quantity')
@@ -106,7 +111,84 @@ export async function POST(
       }
     }
 
-    // Audit
+    // ─── 2. Reverse service BOM deductions ──────────────────
+    // Query inventory_logs for BOM entries related to this sale
+    const { data: bomLogs } = await adminClient
+      .from('inventory_logs')
+      .select('id, inventory_id, product_id, quantity_delta, quantity_before')
+      .eq('sale_id', saleId)
+      .eq('source', 'service_bom');
+
+    for (const log of (bomLogs || []) as Record<string, unknown>[]) {
+      const restoreQty = Math.abs(log.quantity_delta as number);
+
+      // Read current inventory to compute new quantity
+      const { data: currentInv } = await adminClient
+        .from('inventory')
+        .select('id, quantity')
+        .eq('id', log.inventory_id as string)
+        .single();
+
+      if (currentInv) {
+        const currentQty = (currentInv as Record<string, unknown>).quantity as number;
+        const newQty = currentQty + restoreQty;
+
+        await adminClient.from('inventory')
+          .update({ quantity: newQty } as Record<string, unknown>)
+          .eq('id', log.inventory_id as string);
+
+        // Log the reversal (use 'manual_adjust' as safe fallback if void_reversal enum not migrated)
+        await adminClient.from('inventory_logs').insert({
+          inventory_id: log.inventory_id as string,
+          product_id: log.product_id as string,
+          branch_id: sale.branch_id as string,
+          performed_by: currentUser.id,
+          source: 'manual_adjust', // safe fallback; change to 'void_reversal' after migration
+          quantity_delta: restoreQty,
+          quantity_before: currentQty,
+          quantity_after: newQty,
+          sale_id: saleId,
+          notes: `Void reversal of BOM deduction — ${sale.receipt_number as string}`,
+        } as Record<string, unknown>);
+      }
+    }
+
+    // ─── 3. Cancel patient packages + delete payments ────────
+    const saleItemIds = allSaleItems.map(si => si.id as string);
+
+    if (saleItemIds.length > 0) {
+      // Find packages created from this sale's items
+      const { data: packages } = await adminClient
+        .from('patient_packages')
+        .select('id')
+        .in('sale_item_id', saleItemIds);
+
+      const packageIds = ((packages || []) as Record<string, unknown>[]).map(p => p.id as string);
+
+      if (packageIds.length > 0) {
+        // Delete package_payments (void = full reversal, no ledger trail needed)
+        await adminClient
+          .from('package_payments')
+          .delete()
+          .in('package_id', packageIds);
+
+        // Cancel the packages
+        await adminClient
+          .from('patient_packages')
+          .update({ status: 'cancelled' } as Record<string, unknown>)
+          .in('id', packageIds);
+      }
+    }
+
+    // ─── 4. Delete doctor commissions ────────────────────────
+    if (saleItemIds.length > 0) {
+      await adminClient
+        .from('doctor_commissions')
+        .delete()
+        .in('sale_item_id', saleItemIds);
+    }
+
+    // ─── Audit Log ──────────────────────────────────────────
     await adminClient.from('audit_logs').insert({
       user_id: currentUser.id,
       branch_id: sale.branch_id as string,
@@ -114,7 +196,13 @@ export async function POST(
       entity_type: 'sale',
       entity_id: saleId,
       description: `Sale ${sale.receipt_number as string} voided — reason: ${reason}`,
-      metadata: { receipt_number: sale.receipt_number, reason, total: sale.total },
+      metadata: {
+        receipt_number: sale.receipt_number,
+        reason,
+        total: sale.total,
+        bom_logs_reversed: (bomLogs || []).length,
+        packages_cancelled: saleItemIds.length > 0 ? 'checked' : 'none',
+      },
     } as Record<string, unknown>);
 
     return NextResponse.json({ success: true });

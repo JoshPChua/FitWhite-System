@@ -375,6 +375,33 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ─── Rollback helper (compensating cleanup if post-write step fails) ──
+    const rollbackSale = async () => {
+      try {
+        // Reverse any product inventory changes already made for this sale
+        const { data: invLogs } = await adminClient
+          .from('inventory_logs')
+          .select('inventory_id, quantity_delta, quantity_before')
+          .eq('sale_id', saleId);
+
+        for (const log of (invLogs || []) as Record<string, unknown>[]) {
+          // Restore to quantity_before
+          await adminClient.from('inventory')
+            .update({ quantity: log.quantity_before } as Record<string, unknown>)
+            .eq('id', log.inventory_id as string);
+        }
+
+        // Delete inventory logs, stock adjustments, payments, sale items, and sale
+        await adminClient.from('inventory_logs').delete().eq('sale_id', saleId);
+        await adminClient.from('stock_adjustments').delete().eq('reference_id', saleId);
+        await adminClient.from('payments').delete().eq('sale_id', saleId);
+        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
+        await adminClient.from('sales').delete().eq('id', saleId);
+      } catch (rbErr) {
+        console.error('Rollback error (sale may be partially written):', rbErr);
+      }
+    };
+
     // ─── Service BOM deduction ───────────────────────────────
 
     if (ENABLE_SERVICE_BOM) {
@@ -399,7 +426,16 @@ export async function POST(request: NextRequest) {
             if (bomInv) {
               const bomInvData = bomInv as Record<string, unknown>;
               const oldQty = bomInvData.quantity as number;
-              const newQty = Math.max(0, oldQty - bomQty);
+              const newQty = oldQty - bomQty;
+
+              // ── Race detection: if concurrent request consumed stock between
+              //    our pre-check and this deduction, fail cleanly + rollback ──
+              if (newQty < 0) {
+                await rollbackSale();
+                return NextResponse.json({
+                  error: `Concurrent stock conflict for consumable of "${svcItem.name}". Sale rolled back — please retry.`
+                }, { status: 409 });
+              }
 
               await adminClient.from('inventory')
                 .update({ quantity: newQty } as Record<string, unknown>)
@@ -459,18 +495,46 @@ export async function POST(request: NextRequest) {
     }
 
     // ─── Auto-create packages for installment sales ──────────
+    //     Cent-safe pro-rata allocation with remainder to last package
 
     const createdPackages: Array<{ id: string; service_name: string; total_sessions: number }> = [];
 
     if (payment_type === 'installment' && customer_id) {
       const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
 
-      for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
-        const sessionCount = svcItem.default_session_count || 1;
-        if (sessionCount <= 1) continue; // Only create packages for multi-session services
+      // Filter to multi-session service items eligible for packages
+      const packageEligibleItems = verifiedItems.filter(
+        i => i.item_type === 'service' && (i.default_session_count || 1) > 1
+      );
 
+      const totalPackageCost = packageEligibleItems.reduce(
+        (sum, i) => sum + i.unit_price * i.quantity, 0
+      );
+
+      let allocatedSoFar = 0;
+
+      for (let idx = 0; idx < packageEligibleItems.length; idx++) {
+        const svcItem = packageEligibleItems[idx];
+        const sessionCount = svcItem.default_session_count || 1;
         const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
         const itemTotal = svcItem.unit_price * svcItem.quantity;
+        const isLast = idx === packageEligibleItems.length - 1;
+
+        // ── Cent-safe pro-rata allocation ──
+        let allocated: number;
+        if (isLast) {
+          // Last package absorbs exact remainder to prevent ledger drift
+          allocated = Math.min(itemTotal, Math.max(0, totalPaid - allocatedSoFar));
+        } else {
+          const proRata = totalPackageCost > 0
+            ? (itemTotal / totalPackageCost) * totalPaid
+            : 0;
+          allocated = Math.min(
+            Math.round(proRata * 100) / 100,  // centavo-safe rounding
+            itemTotal
+          );
+        }
+        allocatedSoFar += allocated;
 
         const { data: pkg } = await adminClient
           .from('patient_packages')
@@ -480,8 +544,8 @@ export async function POST(request: NextRequest) {
             service_id: svcItem.id,
             sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
             total_price: itemTotal,
-            downpayment: Math.min(totalPaid, itemTotal), // allocate payment proportionally
-            total_paid: Math.min(totalPaid, itemTotal),
+            downpayment: allocated,
+            total_paid: allocated,
             total_sessions: sessionCount * svcItem.quantity,
             attending_doctor_id: attending_doctor_id || null,
             status: 'active',
@@ -498,13 +562,12 @@ export async function POST(request: NextRequest) {
           });
 
           // Record downpayment in package_payments ledger
-          const downpayment = Math.min(totalPaid, itemTotal);
-          if (downpayment > 0) {
+          if (allocated > 0) {
             await adminClient.from('package_payments').insert({
               package_id: (pkg as Record<string, unknown>).id as string,
               branch_id,
               received_by: currentUser.id,
-              amount: downpayment,
+              amount: allocated,
               method: payments[0]?.method || 'cash',
               notes: `Downpayment from sale ${receiptNumber}`,
             } as Record<string, unknown>);

@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { Branch, UserRole } from '@/types/database';
-import { IMUS_ONLY } from '@/lib/feature-flags';
+import { IMUS_ONLY, ENABLE_DOCTOR_COMMISSIONS } from '@/lib/feature-flags';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -34,6 +34,8 @@ interface UserFormData {
   last_name: string;
   role: UserRole;
   branch_id: string;
+  is_doctor: boolean;
+  default_commission_rate: string;
 }
 
 const ROLE_CONFIG: Record<UserRole, { label: string; variant: 'brand' | 'info' | 'default' }> = {
@@ -63,6 +65,8 @@ export default function UsersPage() {
     last_name: '',
     role: 'cashier',
     branch_id: '',
+    is_doctor: false,
+    default_commission_rate: '',
   });
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
@@ -149,7 +153,9 @@ export default function UsersPage() {
       first_name: '',
       last_name: '',
       role: 'cashier',
-      branch_id: isManager ? (selectedBranch?.id || '') : '',
+      branch_id: (IMUS_ONLY || isManager) ? (selectedBranch?.id || '') : '',
+      is_doctor: false,
+      default_commission_rate: '',
     });
     setFormError('');
     setFormSuccess('');
@@ -166,6 +172,8 @@ export default function UsersPage() {
       last_name: u.last_name,
       role: u.role,
       branch_id: u.branch_id || '',
+      is_doctor: (u as unknown as Record<string, unknown>).is_doctor as boolean || false,
+      default_commission_rate: String((u as unknown as Record<string, unknown>).default_commission_rate || ''),
     });
     setFormError('');
     setFormSuccess('');
@@ -191,10 +199,18 @@ export default function UsersPage() {
           return;
         }
 
+        const createPayload = {
+          ...formData,
+          is_doctor: formData.is_doctor,
+          default_commission_rate: formData.default_commission_rate
+            ? parseFloat(formData.default_commission_rate)
+            : null,
+        };
+
         const res = await fetch('/api/users', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(formData),
+          body: JSON.stringify(createPayload),
         });
 
         const result = await res.json();
@@ -217,6 +233,13 @@ export default function UsersPage() {
         if (formData.last_name !== editingUser.last_name) updates.last_name = formData.last_name;
         if (formData.role !== editingUser.role) updates.role = formData.role;
         if (formData.branch_id !== editingUser.branch_id) updates.branch_id = formData.branch_id;
+
+        // Doctor fields
+        const editIs = (editingUser as unknown as Record<string, unknown>).is_doctor as boolean || false;
+        const editRate = (editingUser as unknown as Record<string, unknown>).default_commission_rate;
+        if (formData.is_doctor !== editIs) updates.is_doctor = formData.is_doctor;
+        const parsedRate = formData.default_commission_rate ? parseFloat(formData.default_commission_rate) : null;
+        if (parsedRate !== (editRate as number | null)) updates.default_commission_rate = parsedRate;
 
         if (Object.keys(updates).length === 0) {
           setFormError('No changes detected');
@@ -735,25 +758,65 @@ export default function UsersPage() {
             )}
           </div>
 
-          {/* Branch */}
-          <div>
-            <label className="block text-sm font-medium text-brand-800 mb-1.5">Branch</label>
-            <select
-              value={formData.branch_id}
-              onChange={(e) => setFormData({ ...formData, branch_id: e.target.value })}
-              required
-              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
-                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all duration-200"
-            >
-              <option value="">Select branch...</option>
-              {assignableBranches.map((b) => (
-                <option key={b.id} value={b.id}>{b.name}</option>
-              ))}
-            </select>
-            {isManager && (
-              <p className="text-xs text-brand-400 mt-1">Staff will be assigned to your branch</p>
-            )}
-          </div>
+          {/* Branch — hidden in IMUS_ONLY (auto-assigned) */}
+          {!IMUS_ONLY && (
+            <div>
+              <label className="block text-sm font-medium text-brand-800 mb-1.5">Branch</label>
+              <select
+                value={formData.branch_id}
+                onChange={(e) => setFormData({ ...formData, branch_id: e.target.value })}
+                required
+                className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
+                           focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all duration-200"
+              >
+                <option value="">Select branch...</option>
+                {assignableBranches.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+              {isManager && (
+                <p className="text-xs text-brand-400 mt-1">Staff will be assigned to your branch</p>
+              )}
+            </div>
+          )}
+
+          {/* Doctor Fields (Phase 4) */}
+          {ENABLE_DOCTOR_COMMISSIONS && (
+            <div className="bg-surface-50 rounded-xl p-4 space-y-3 border border-brand-100/50">
+              <div className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  id="is_doctor"
+                  checked={formData.is_doctor}
+                  onChange={(e) => setFormData({ ...formData, is_doctor: e.target.checked })}
+                  className="w-4 h-4 rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                />
+                <label htmlFor="is_doctor" className="text-sm font-medium text-brand-800">
+                  This staff member is a Doctor
+                </label>
+              </div>
+              {formData.is_doctor && (
+                <div>
+                  <label className="block text-sm font-medium text-brand-800 mb-1.5">Default Commission Rate</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={formData.default_commission_rate}
+                      onChange={(e) => setFormData({ ...formData, default_commission_rate: e.target.value })}
+                      placeholder="e.g. 30"
+                      className="w-32 px-4 py-2.5 rounded-xl border border-brand-200 bg-white text-brand-900 placeholder:text-brand-300
+                                 focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all duration-200"
+                    />
+                    <span className="text-sm text-brand-500">%</span>
+                  </div>
+                  <p className="text-xs text-brand-400 mt-1">Commission calculated as percentage of service gross amount</p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Edit mode: show email (read-only) */}
           {formMode === 'edit' && (

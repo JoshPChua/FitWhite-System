@@ -48,12 +48,10 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // Redirect authenticated users away from login page
-  if (user && request.nextUrl.pathname.startsWith('/login')) {
-    const url = request.nextUrl.clone();
-    url.pathname = '/dashboard';
-    return NextResponse.redirect(url);
-  }
+  // Note: we intentionally do NOT redirect authenticated users away from /login here.
+  // The login page (login-form.tsx) handles post-auth routing client-side based on the
+  // user's role (cashier → /pos, others → /dashboard). A middleware redirect would
+  // override the role-aware routing.
 
   return supabaseResponse;
 }

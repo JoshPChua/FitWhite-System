@@ -27,7 +27,8 @@ export type InvLogSource =
   | 'refund_return'
   | 'manual_adjust'
   | 'initial_stock'
-  | 'bulk_upload';
+  | 'bulk_upload'
+  | 'void_reversal';
 export type SalePaymentType = 'full' | 'installment' | 'package_use';
 
 // ─── Database type for Supabase client ──────────────────────
