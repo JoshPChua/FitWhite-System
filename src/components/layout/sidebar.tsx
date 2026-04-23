@@ -26,11 +26,13 @@ import {
   Clock,
   FileText,
   Building2,
-  ChevronDown,
+  ChevronRight,
   LogOut,
   Settings,
   X,
   Menu,
+  Stethoscope,
+  Wallet,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -56,69 +58,89 @@ function isGroup(entry: NavEntry): entry is NavGroup {
 }
 
 /**
- * Build the navigation structure based on role and feature flags.
- * Owner sees everything; Manager sees operations; Cashier sees POS essentials.
+ * Role-aware navigation builder.
+ *
+ * Owner sees the full structure with collapsible groups.
+ * Manager and Cashier see the same simplified flat/short menu
+ * (unified as "operational" role for sidebar purposes).
  */
 function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
-  const nav: NavEntry[] = [];
+  const isOperational = role === 'manager' || role === 'cashier';
 
-  // ─── Always visible (top-level) ────────────────────────
-  if (role !== 'cashier') {
-    nav.push({ href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard });
-  }
-  nav.push({ href: '/pos', label: 'POS', icon: ShoppingCart });
-  nav.push({ href: '/customers', label: 'Customers', icon: Users });
+  // ─── Operational menu (Manager + Cashier) ───────────────
+  if (isOperational) {
+    const nav: NavEntry[] = [
+      { href: '/pos', label: 'POS', icon: ShoppingCart },
+      { href: '/customers', label: 'Customers', icon: Users },
+      { href: '/sales', label: 'Sales', icon: BadgeDollarSign },
+    ];
 
-  // ─── Inventory group ───────────────────────────────────
-  if (role === 'owner' || role === 'manager') {
+    // Inventory group
     const inventoryItems: NavItem[] = [
-      { href: '/products', label: 'Products', icon: Package },
       { href: '/inventory', label: 'Stock Levels', icon: Boxes },
     ];
     if (ENABLE_SERVICE_BOM) {
       inventoryItems.push({ href: '/inventory-logs', label: 'Stock Logs', icon: ClipboardList });
     }
     nav.push({ id: 'inventory', label: 'Inventory', icon: Boxes, items: inventoryItems });
+
+    // Shifts (flat)
+    if (ENABLE_SHIFTS) {
+      nav.push({ href: '/shifts', label: 'Shifts', icon: Clock });
+    }
+
+    return nav;
   }
 
-  // ─── Clinic group ──────────────────────────────────────
+  // ─── Owner menu ────────────────────────────────────────
+  const nav: NavEntry[] = [
+    { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { href: '/pos', label: 'POS', icon: ShoppingCart },
+    { href: '/customers', label: 'Customers', icon: Users },
+  ];
+
+  // Inventory
+  const inventoryItems: NavItem[] = [
+    { href: '/products', label: 'Products', icon: Package },
+    { href: '/inventory', label: 'Stock Levels', icon: Boxes },
+  ];
+  if (ENABLE_SERVICE_BOM) {
+    inventoryItems.push({ href: '/inventory-logs', label: 'Stock Logs', icon: ClipboardList });
+  }
+  nav.push({ id: 'inventory', label: 'Inventory', icon: Boxes, items: inventoryItems });
+
+  // Clinic
   const clinicItems: NavItem[] = [
     { href: '/services', label: 'Services', icon: Syringe },
+    { href: '/bundles', label: 'Bundles', icon: Gift },
   ];
-  if (role === 'owner' || role === 'manager') {
-    clinicItems.push({ href: '/bundles', label: 'Bundles', icon: Gift });
-  }
   if (ENABLE_PATIENT_PACKAGES) {
     clinicItems.push({ href: '/packages', label: 'Packages', icon: Package });
   }
-  nav.push({ id: 'clinic', label: 'Clinic', icon: Syringe, items: clinicItems });
+  nav.push({ id: 'clinic', label: 'Clinic', icon: Stethoscope, items: clinicItems });
 
-  // ─── Reports group ─────────────────────────────────────
-  if (role === 'owner' || role === 'manager') {
-    const reportItems: NavItem[] = [
-      { href: '/sales', label: 'Sales', icon: BadgeDollarSign },
-    ];
-    if (ENABLE_DOCTOR_COMMISSIONS) {
-      reportItems.push({ href: '/commissions', label: 'Commissions', icon: BadgeDollarSign });
-    }
-    reportItems.push({ href: '/reports', label: 'Reports', icon: BarChart3 });
-    nav.push({ id: 'reports', label: 'Reports', icon: BarChart3, items: reportItems });
+  // Finance
+  const financeItems: NavItem[] = [
+    { href: '/sales', label: 'Sales', icon: BadgeDollarSign },
+  ];
+  if (ENABLE_DOCTOR_COMMISSIONS) {
+    financeItems.push({ href: '/commissions', label: 'Commissions', icon: Wallet });
   }
+  financeItems.push({ href: '/reports', label: 'Reports', icon: BarChart3 });
+  nav.push({ id: 'finance', label: 'Finance', icon: BadgeDollarSign, items: financeItems });
 
-  // ─── Admin group (owner + manager) ─────────────────────
-  if (role === 'owner' || role === 'manager') {
-    const adminItems: NavItem[] = [
-      { href: '/users', label: role === 'owner' ? 'Users' : 'Staff', icon: UserCog },
-    ];
-    if (ENABLE_SHIFTS) {
-      adminItems.push({ href: '/shifts', label: 'Shifts', icon: Clock });
-    }
-    adminItems.push({ href: '/audit-logs', label: 'Audit Logs', icon: FileText });
-    if (!IMUS_ONLY && role === 'owner') {
-      adminItems.push({ href: '/branches', label: 'Branches', icon: Building2 });
-    }
-    nav.push({ id: 'admin', label: 'Admin', icon: Settings, items: adminItems });
+  // Admin
+  const adminItems: NavItem[] = [
+    { href: '/users', label: 'Users', icon: UserCog },
+  ];
+  if (ENABLE_SHIFTS) {
+    adminItems.push({ href: '/shifts', label: 'Shifts', icon: Clock });
   }
+  adminItems.push({ href: '/audit-logs', label: 'Audit Logs', icon: FileText });
+  if (!IMUS_ONLY) {
+    adminItems.push({ href: '/branches', label: 'Branches', icon: Building2 });
+  }
+  nav.push({ id: 'admin', label: 'Admin', icon: Settings, items: adminItems });
 
   return nav;
 }
@@ -149,7 +171,14 @@ export function Sidebar() {
         if (hasActive) newExpanded[entry.id] = true;
       }
     }
-    setExpanded((prev) => ({ ...prev, ...newExpanded }));
+    setExpanded((prev) => {
+      // Only add active expansions; preserve manual collapses for non-active groups
+      const merged = { ...prev };
+      for (const [key, val] of Object.entries(newExpanded)) {
+        if (val) merged[key] = true;
+      }
+      return merged;
+    });
   }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Toggle group
@@ -179,7 +208,6 @@ export function Sidebar() {
     try {
       await signOut();
     } finally {
-      // Force hard redirect to clear all cached state
       window.location.href = '/login';
     }
   }, [signOut]);
@@ -198,15 +226,15 @@ export function Sidebar() {
         <Link
           key={item.href}
           href={item.href}
-          className={`group flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200
+          className={`group flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm font-semibold transition-all duration-150
             ${active
-              ? 'bg-brand-600 text-white shadow-md shadow-brand-600/25'
+              ? 'bg-brand-600 text-white shadow-md shadow-brand-600/20'
               : 'bg-brand-50 text-brand-700 hover:bg-brand-100 hover:shadow-sm'
             }`}
         >
-          <item.icon className={`w-[18px] h-[18px] flex-shrink-0 ${active ? 'text-white' : 'text-brand-500 group-hover:text-brand-600'}`} />
+          <item.icon className={`w-[17px] h-[17px] flex-shrink-0 ${active ? 'text-white' : 'text-brand-500 group-hover:text-brand-600'}`} />
           <span>{item.label}</span>
-          <kbd className={`ml-auto text-[9px] px-1.5 py-0.5 rounded font-mono ${active ? 'bg-white/20 text-white/80' : 'bg-brand-100 text-brand-400'}`}>
+          <kbd className={`ml-auto text-[9px] px-1.5 py-0.5 rounded font-mono ${active ? 'bg-white/20 text-white/70' : 'bg-brand-100 text-brand-400'}`}>
             ⌘P
           </kbd>
         </Link>
@@ -217,13 +245,13 @@ export function Sidebar() {
       <Link
         key={item.href}
         href={item.href}
-        className={`flex items-center gap-3 ${nested ? 'pl-9 pr-3' : 'px-3'} py-2 rounded-xl text-sm font-medium transition-all duration-200
+        className={`flex items-center gap-2.5 ${nested ? 'pl-8 pr-3' : 'px-3'} py-1.5 rounded-lg text-[13px] font-medium transition-all duration-150
           ${active
             ? 'bg-brand-50 text-brand-700'
-            : 'text-brand-500 hover:bg-brand-50/60 hover:text-brand-700'
+            : 'text-brand-400 hover:bg-brand-50/50 hover:text-brand-600'
           }`}
       >
-        <item.icon className={`w-[16px] h-[16px] flex-shrink-0 ${active ? 'text-brand-600' : ''}`} />
+        <item.icon className={`w-[15px] h-[15px] flex-shrink-0 ${active ? 'text-brand-500' : ''}`} />
         <span>{item.label}</span>
       </Link>
     );
@@ -238,16 +266,16 @@ export function Sidebar() {
       <div key={group.id}>
         <button
           onClick={() => toggleGroup(group.id)}
-          className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200
+          className={`w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-all duration-150
             ${hasActive
               ? 'text-brand-700'
               : 'text-brand-400 hover:text-brand-600 hover:bg-brand-50/40'
             }`}
         >
-          <group.icon className={`w-[16px] h-[16px] flex-shrink-0 ${hasActive ? 'text-brand-500' : ''}`} />
+          <group.icon className={`w-[15px] h-[15px] flex-shrink-0 ${hasActive ? 'text-brand-500' : ''}`} />
           <span className="flex-1 text-left">{group.label}</span>
-          <ChevronDown
-            className={`w-3.5 h-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+          <ChevronRight
+            className={`w-3 h-3 transition-transform duration-200 ${open ? 'rotate-90' : ''}`}
           />
         </button>
         <div
@@ -255,7 +283,7 @@ export function Sidebar() {
             open ? 'max-h-96 opacity-100 mt-0.5' : 'max-h-0 opacity-0'
           }`}
         >
-          <div className="space-y-0.5 pb-1">
+          <div className="space-y-px pb-0.5">
             {group.items.map((item) => renderNavItem(item, true))}
           </div>
         </div>
@@ -263,57 +291,69 @@ export function Sidebar() {
     );
   };
 
+  // ─── Section separator ────────────────────────────────
+  const Divider = () => <div className="h-px bg-brand-100/50 mx-3 my-1.5" />;
+
   // ─── Sidebar content (shared between desktop + mobile) ─
   const sidebarContent = (
     <>
       {/* Brand Header */}
-      <div className="p-5 border-b border-brand-100/60 flex items-center justify-between">
-        <Link href="/dashboard" className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm">
-            <span className="text-sm font-bold text-white font-display">FW</span>
+      <div className="px-4 py-3.5 border-b border-brand-100/50 flex items-center justify-between">
+        <Link href={role === 'owner' ? '/dashboard' : '/pos'} className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm">
+            <span className="text-xs font-bold text-white font-display">FW</span>
           </div>
           <div>
             <h1 className="text-sm font-bold text-brand-900 leading-none">FitWhite</h1>
-            <p className="text-[10px] text-brand-400 mt-0.5">Aesthetics · Imus</p>
+            <p className="text-[9px] text-brand-400 mt-0.5">Aesthetics · Imus</p>
           </div>
         </Link>
-        {/* Mobile close button */}
+        {/* Mobile close */}
         <button
           onClick={() => setMobileOpen(false)}
-          className="lg:hidden p-1.5 rounded-lg text-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
+          className="lg:hidden p-1 rounded-md text-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
         >
-          <X className="w-5 h-5" />
+          <X className="w-4 h-4" />
         </button>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto py-3 px-3">
-        <div className="space-y-0.5">
-          {nav.map((entry) =>
-            isGroup(entry) ? renderNavGroup(entry) : renderNavItem(entry)
-          )}
+      <nav className="flex-1 overflow-y-auto py-2 px-2">
+        <div className="space-y-px">
+          {nav.map((entry, i) => {
+            // Insert a divider before the first group (visual separation from top-level items)
+            const prevEntry = nav[i - 1];
+            const needsDivider = isGroup(entry) && prevEntry && !isGroup(prevEntry);
+
+            return (
+              <div key={isGroup(entry) ? entry.id : entry.href}>
+                {needsDivider && <Divider />}
+                {isGroup(entry) ? renderNavGroup(entry) : renderNavItem(entry)}
+              </div>
+            );
+          })}
         </div>
       </nav>
 
       {/* User Footer */}
-      <div className="p-3 border-t border-brand-100/60 space-y-1">
+      <div className="p-2 border-t border-brand-100/50">
         <Link
           href="/profile"
-          className={`flex items-center gap-3 px-3 py-2 rounded-xl transition-all hover:bg-brand-50/60 ${
+          className={`flex items-center gap-2.5 px-2.5 py-2 rounded-lg transition-all hover:bg-brand-50/60 ${
             pathname === '/profile' ? 'bg-brand-50 text-brand-700' : ''
           }`}
         >
-          <div className="w-8 h-8 rounded-lg bg-brand-100 flex items-center justify-center flex-shrink-0">
-            <span className="text-xs font-semibold text-brand-600">
+          <div className="w-7 h-7 rounded-md bg-brand-100 flex items-center justify-center flex-shrink-0">
+            <span className="text-[10px] font-semibold text-brand-600">
               {profile?.first_name?.[0]}
               {profile?.last_name?.[0]}
             </span>
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-brand-800 truncate">
+            <p className="text-xs font-medium text-brand-800 truncate leading-tight">
               {profile?.first_name} {profile?.last_name}
             </p>
-            <p className="text-[10px] text-brand-400 capitalize truncate">
+            <p className="text-[10px] text-brand-400 capitalize leading-tight">
               {profile?.role}
             </p>
           </div>
@@ -321,12 +361,12 @@ export function Sidebar() {
         <button
           onClick={handleSignOut}
           disabled={isSigningOut}
-          className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium
-                     text-rose-500 hover:bg-rose-50 hover:text-rose-600 transition-all
+          className="w-full flex items-center gap-2.5 px-2.5 py-1.5 mt-0.5 rounded-lg text-xs font-medium
+                     text-rose-400 hover:bg-rose-50 hover:text-rose-600 transition-all
                      disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <LogOut className="w-4 h-4" />
-          {isSigningOut ? 'Signing out...' : 'Sign Out'}
+          <LogOut className="w-3.5 h-3.5" />
+          {isSigningOut ? 'Signing out…' : 'Sign Out'}
         </button>
       </div>
     </>
@@ -353,7 +393,7 @@ export function Sidebar() {
 
       {/* Mobile drawer */}
       <aside
-        className={`fixed left-0 top-0 h-screen w-72 bg-white border-r border-brand-100/80 shadow-sidebar flex flex-col z-50
+        className={`fixed left-0 top-0 h-screen w-64 bg-white border-r border-brand-100/80 shadow-sidebar flex flex-col z-50
           lg:hidden transition-transform duration-300 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}
       >
         {sidebarContent}
