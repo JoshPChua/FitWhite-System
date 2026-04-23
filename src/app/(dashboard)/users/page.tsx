@@ -20,6 +20,8 @@ interface UserProfile {
   branch_id: string | null;
   is_active: boolean;
   avatar_url: string | null;
+  is_doctor: boolean;
+  default_commission_rate: number | null;
   created_at: string;
   updated_at: string;
   branch_name?: string;
@@ -113,6 +115,8 @@ export default function UsersPage() {
         branch_id: u.branch_id as string | null,
         is_active: u.is_active as boolean,
         avatar_url: u.avatar_url as string | null,
+        is_doctor: (u.is_doctor as boolean) || false,
+        default_commission_rate: u.default_commission_rate as number | null,
         created_at: u.created_at as string,
         updated_at: u.updated_at as string,
         branch_name: (u.branches as Record<string, unknown>)?.name as string || 'Unassigned',
@@ -172,8 +176,8 @@ export default function UsersPage() {
       last_name: u.last_name,
       role: u.role,
       branch_id: u.branch_id || '',
-      is_doctor: (u as unknown as Record<string, unknown>).is_doctor as boolean || false,
-      default_commission_rate: String((u as unknown as Record<string, unknown>).default_commission_rate || ''),
+      is_doctor: u.is_doctor || false,
+      default_commission_rate: u.default_commission_rate != null ? String(u.default_commission_rate) : '',
     });
     setFormError('');
     setFormSuccess('');
@@ -235,11 +239,9 @@ export default function UsersPage() {
         if (formData.branch_id !== editingUser.branch_id) updates.branch_id = formData.branch_id;
 
         // Doctor fields
-        const editIs = (editingUser as unknown as Record<string, unknown>).is_doctor as boolean || false;
-        const editRate = (editingUser as unknown as Record<string, unknown>).default_commission_rate;
-        if (formData.is_doctor !== editIs) updates.is_doctor = formData.is_doctor;
+        if (formData.is_doctor !== (editingUser.is_doctor || false)) updates.is_doctor = formData.is_doctor;
         const parsedRate = formData.default_commission_rate ? parseFloat(formData.default_commission_rate) : null;
-        if (parsedRate !== (editRate as number | null)) updates.default_commission_rate = parsedRate;
+        if (parsedRate !== editingUser.default_commission_rate) updates.default_commission_rate = parsedRate;
 
         if (Object.keys(updates).length === 0) {
           setFormError('No changes detected');

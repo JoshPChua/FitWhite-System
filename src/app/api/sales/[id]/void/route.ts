@@ -11,10 +11,13 @@ import type { Profile } from '@/types/database';
  *   2. Reverse service BOM consumable deductions
  *   3. Cancel patient packages + delete auto-created package_payments
  *   4. Delete doctor commissions
+ *   5. Mark sale as voided (LAST — only after all reversals succeed)
  *
- * Security:
- *   - Partial-refund sales cannot be voided (inventory already partially returned)
- *   - Only 'completed' sales can be voided
+ * Ordering invariant:
+ *   All reversals run BEFORE the sale status is set to 'voided'.
+ *   If any reversal step fails, the sale stays 'completed' and the caller
+ *   gets an error describing what failed. This prevents partial-void states
+ *   where the sale is voided but side-effect data is inconsistent.
  */
 export async function POST(
   request: NextRequest,
@@ -65,41 +68,57 @@ export async function POST(
       }, { status: 400 });
     }
 
-    // Only 'completed' sales reach here
+    // Only 'completed' sales reach here.
+    // All reversals happen BEFORE we mark the sale as voided.
 
-    // Void the sale
-    const { error: voidError } = await adminClient
-      .from('sales')
-      .update({ status: 'voided' } as Record<string, unknown>)
-      .eq('id', saleId);
-
-    if (voidError) return NextResponse.json({ error: voidError.message }, { status: 500 });
-
-    // ─── 1. Restore product inventory ───────────────────────
-    const { data: saleItems } = await adminClient
+    // ─── Fetch sale items (needed by all reversal steps) ────
+    const { data: saleItems, error: saleItemsError } = await adminClient
       .from('sale_items')
       .select('id, product_id, service_id, quantity, name, item_type')
       .eq('sale_id', saleId);
 
+    if (saleItemsError) {
+      return NextResponse.json({
+        error: `Failed to fetch sale items: ${saleItemsError.message}. Sale NOT voided.`
+      }, { status: 500 });
+    }
+
     const allSaleItems = (saleItems || []) as Record<string, unknown>[];
+    const saleItemIds = allSaleItems.map(si => si.id as string);
+
+    // ─── 1. Restore product inventory ───────────────────────
     const productSaleItems = allSaleItems.filter(si => si.item_type === 'product');
 
     for (const item of productSaleItems) {
-      const { data: inv } = await adminClient
+      const { data: inv, error: invErr } = await adminClient
         .from('inventory')
         .select('id, quantity')
         .eq('product_id', item.product_id as string)
         .eq('branch_id', sale.branch_id as string)
         .single();
 
+      if (invErr) {
+        return NextResponse.json({
+          error: `Failed to read inventory for product "${item.name}": ${invErr.message}. Sale NOT voided.`
+        }, { status: 500 });
+      }
+
       if (inv) {
         const invRecord = inv as Record<string, unknown>;
         const newQty = (invRecord.quantity as number) + (item.quantity as number);
-        await adminClient.from('inventory')
+
+        const { error: updateErr } = await adminClient.from('inventory')
           .update({ quantity: newQty } as Record<string, unknown>)
           .eq('id', invRecord.id as string);
 
-        await adminClient.from('stock_adjustments').insert({
+        if (updateErr) {
+          return NextResponse.json({
+            error: `Failed to restore inventory for "${item.name}": ${updateErr.message}. Sale NOT voided.`
+          }, { status: 500 });
+        }
+
+        // Stock adjustment log
+        const { error: adjErr } = await adminClient.from('stock_adjustments').insert({
           inventory_id: invRecord.id as string,
           branch_id: sale.branch_id as string,
           user_id: currentUser.id,
@@ -108,37 +127,57 @@ export async function POST(
           reason: `Void of ${sale.receipt_number as string}`,
           reference_id: saleId,
         } as Record<string, unknown>);
+
+        if (adjErr) {
+          console.error('Stock adjustment log failed (non-fatal):', adjErr);
+        }
       }
     }
 
     // ─── 2. Reverse service BOM deductions ──────────────────
-    // Query inventory_logs for BOM entries related to this sale
-    const { data: bomLogs } = await adminClient
+    const { data: bomLogs, error: bomLogsErr } = await adminClient
       .from('inventory_logs')
       .select('id, inventory_id, product_id, quantity_delta, quantity_before')
       .eq('sale_id', saleId)
       .eq('source', 'service_bom');
 
+    if (bomLogsErr) {
+      return NextResponse.json({
+        error: `Failed to read BOM logs: ${bomLogsErr.message}. Sale NOT voided.`
+      }, { status: 500 });
+    }
+
     for (const log of (bomLogs || []) as Record<string, unknown>[]) {
       const restoreQty = Math.abs(log.quantity_delta as number);
 
-      // Read current inventory to compute new quantity
-      const { data: currentInv } = await adminClient
+      const { data: currentInv, error: readErr } = await adminClient
         .from('inventory')
         .select('id, quantity')
         .eq('id', log.inventory_id as string)
         .single();
 
+      if (readErr) {
+        return NextResponse.json({
+          error: `Failed to read BOM inventory: ${readErr.message}. Sale NOT voided.`
+        }, { status: 500 });
+      }
+
       if (currentInv) {
         const currentQty = (currentInv as Record<string, unknown>).quantity as number;
         const newQty = currentQty + restoreQty;
 
-        await adminClient.from('inventory')
+        const { error: updateErr } = await adminClient.from('inventory')
           .update({ quantity: newQty } as Record<string, unknown>)
           .eq('id', log.inventory_id as string);
 
-        // Log the reversal (use 'manual_adjust' as safe fallback if void_reversal enum not migrated)
-        await adminClient.from('inventory_logs').insert({
+        if (updateErr) {
+          return NextResponse.json({
+            error: `Failed to restore BOM inventory: ${updateErr.message}. Sale NOT voided.`
+          }, { status: 500 });
+        }
+
+        // Log the reversal
+        const { error: logErr } = await adminClient.from('inventory_logs').insert({
           inventory_id: log.inventory_id as string,
           product_id: log.product_id as string,
           branch_id: sale.branch_id as string,
@@ -150,42 +189,81 @@ export async function POST(
           sale_id: saleId,
           notes: `Void reversal of BOM deduction — ${sale.receipt_number as string}`,
         } as Record<string, unknown>);
+
+        if (logErr) {
+          console.error('BOM reversal log failed (non-fatal):', logErr);
+        }
       }
     }
 
     // ─── 3. Cancel patient packages + delete payments ────────
-    const saleItemIds = allSaleItems.map(si => si.id as string);
-
     if (saleItemIds.length > 0) {
-      // Find packages created from this sale's items
-      const { data: packages } = await adminClient
+      const { data: packages, error: pkgErr } = await adminClient
         .from('patient_packages')
         .select('id')
         .in('sale_item_id', saleItemIds);
 
+      if (pkgErr) {
+        return NextResponse.json({
+          error: `Failed to read packages: ${pkgErr.message}. Sale NOT voided.`
+        }, { status: 500 });
+      }
+
       const packageIds = ((packages || []) as Record<string, unknown>[]).map(p => p.id as string);
 
       if (packageIds.length > 0) {
-        // Delete package_payments (void = full reversal, no ledger trail needed)
-        await adminClient
+        // Delete package_payments first (FK constraint)
+        const { error: ppDelErr } = await adminClient
           .from('package_payments')
           .delete()
           .in('package_id', packageIds);
 
+        if (ppDelErr) {
+          return NextResponse.json({
+            error: `Failed to delete package payments: ${ppDelErr.message}. Sale NOT voided.`
+          }, { status: 500 });
+        }
+
         // Cancel the packages
-        await adminClient
+        const { error: pkgCancelErr } = await adminClient
           .from('patient_packages')
           .update({ status: 'cancelled' } as Record<string, unknown>)
           .in('id', packageIds);
+
+        if (pkgCancelErr) {
+          return NextResponse.json({
+            error: `Failed to cancel packages: ${pkgCancelErr.message}. Sale NOT voided.`
+          }, { status: 500 });
+        }
       }
     }
 
     // ─── 4. Delete doctor commissions ────────────────────────
     if (saleItemIds.length > 0) {
-      await adminClient
+      const { error: commDelErr } = await adminClient
         .from('doctor_commissions')
         .delete()
         .in('sale_item_id', saleItemIds);
+
+      if (commDelErr) {
+        return NextResponse.json({
+          error: `Failed to delete commissions: ${commDelErr.message}. Sale NOT voided.`
+        }, { status: 500 });
+      }
+    }
+
+    // ─── 5. Mark sale as voided (LAST) ──────────────────────
+    //   All reversals succeeded. Now it is safe to flip the status.
+    const { error: voidError } = await adminClient
+      .from('sales')
+      .update({ status: 'voided' } as Record<string, unknown>)
+      .eq('id', saleId);
+
+    if (voidError) {
+      return NextResponse.json({
+        error: `All reversals succeeded but failed to mark sale as voided: ${voidError.message}. ` +
+               'The sale data is consistent but status was not updated. Contact support.'
+      }, { status: 500 });
     }
 
     // ─── Audit Log ──────────────────────────────────────────
@@ -200,8 +278,9 @@ export async function POST(
         receipt_number: sale.receipt_number,
         reason,
         total: sale.total,
+        products_restored: productSaleItems.length,
         bom_logs_reversed: (bomLogs || []).length,
-        packages_cancelled: saleItemIds.length > 0 ? 'checked' : 'none',
+        packages_cancelled: saleItemIds.length,
       },
     } as Record<string, unknown>);
 
