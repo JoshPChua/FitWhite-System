@@ -87,8 +87,54 @@ CREATE POLICY doctors_delete ON doctors FOR DELETE TO authenticated
 ALTER TABLE sales ADD COLUMN IF NOT EXISTS commission_mode TEXT CHECK (commission_mode IN ('default', 'percent', 'fixed'));
 ALTER TABLE sales ADD COLUMN IF NOT EXISTS commission_value NUMERIC(12,4);
 
--- 5. Note: attending_doctor_id on sales currently references profiles(id).
---    For backward compatibility we keep that FK as-is. New code will store
---    doctors.id there. Since both are UUIDs with no enforced FK to profiles
---    (the schema uses Record<string,unknown> casts), this works safely.
---    In a future migration, the FK can be formally re-pointed to doctors(id).
+-- 5. Re-point doctor FK constraints from profiles(id) → doctors(id)
+--    These columns previously referenced profiles(id) when doctors were auth users.
+--    Now they reference the standalone doctors table.
+
+-- sales.attending_doctor_id
+ALTER TABLE sales DROP CONSTRAINT IF EXISTS sales_attending_doctor_id_fkey;
+ALTER TABLE sales ADD CONSTRAINT sales_attending_doctor_id_fkey
+  FOREIGN KEY (attending_doctor_id) REFERENCES doctors(id) ON DELETE SET NULL;
+
+-- patient_packages.attending_doctor_id
+ALTER TABLE patient_packages DROP CONSTRAINT IF EXISTS patient_packages_attending_doctor_id_fkey;
+ALTER TABLE patient_packages ADD CONSTRAINT patient_packages_attending_doctor_id_fkey
+  FOREIGN KEY (attending_doctor_id) REFERENCES doctors(id) ON DELETE SET NULL;
+
+-- package_sessions.doctor_id
+ALTER TABLE package_sessions DROP CONSTRAINT IF EXISTS package_sessions_doctor_id_fkey;
+ALTER TABLE package_sessions ADD CONSTRAINT package_sessions_doctor_id_fkey
+  FOREIGN KEY (doctor_id) REFERENCES doctors(id) ON DELETE SET NULL;
+
+-- doctor_commissions.doctor_id
+ALTER TABLE doctor_commissions DROP CONSTRAINT IF EXISTS doctor_commissions_doctor_id_fkey;
+ALTER TABLE doctor_commissions ADD CONSTRAINT doctor_commissions_doctor_id_fkey
+  FOREIGN KEY (doctor_id) REFERENCES doctors(id) ON DELETE RESTRICT;
+
+-- 6. Backfill existing sales/packages/commissions doctor references
+--    Update any attending_doctor_id or doctor_id values that still point to
+--    profiles.id to instead point to the corresponding doctors.id
+--    (matched via the doctors.profile_id linkage from the backfill above).
+UPDATE sales s
+  SET attending_doctor_id = d.id
+  FROM doctors d
+  WHERE s.attending_doctor_id = d.profile_id
+    AND d.profile_id IS NOT NULL;
+
+UPDATE patient_packages pp
+  SET attending_doctor_id = d.id
+  FROM doctors d
+  WHERE pp.attending_doctor_id = d.profile_id
+    AND d.profile_id IS NOT NULL;
+
+UPDATE package_sessions ps
+  SET doctor_id = d.id
+  FROM doctors d
+  WHERE ps.doctor_id = d.profile_id
+    AND d.profile_id IS NOT NULL;
+
+UPDATE doctor_commissions dc
+  SET doctor_id = d.id
+  FROM doctors d
+  WHERE dc.doctor_id = d.profile_id
+    AND d.profile_id IS NOT NULL;
