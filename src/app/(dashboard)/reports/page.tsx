@@ -453,6 +453,11 @@ export default function ReportsPage() {
                 <p className="text-xl font-semibold mt-1 text-violet-700">{formatCurrency(data.commissionsTotal)}</p>
                 <p className="text-xs text-brand-400 mt-1">{formatCurrency(data.commissionsUnpaid)} unpaid</p>
               </div>
+              <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
+                <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">Net Branch Sales</p>
+                <p className="text-xl font-semibold mt-1 text-brand-900">{formatCurrency(data.totalRevenue - data.commissionsTotal)}</p>
+                <p className="text-xs text-brand-400 mt-1">gross − commissions</p>
+              </div>
             </>
           )}
           {ENABLE_SHIFTS && (

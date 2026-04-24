@@ -48,7 +48,7 @@ export default function CommissionsPage() {
           branch_id: c.branch_id as string,
           doctor_id: c.doctor_id as string,
           doctor_name: c.doctor
-            ? `Dr. ${(c.doctor as Record<string, unknown>).first_name} ${(c.doctor as Record<string, unknown>).last_name}`
+            ? (c.doctor as Record<string, unknown>).full_name as string
             : 'Unknown',
           gross_amount: Number(c.gross_amount),
           commission_rate: Number(c.commission_rate),
@@ -166,7 +166,7 @@ export default function CommissionsPage() {
                 { header: 'Doctor', accessor: r => r.doctor_name },
                 { header: 'Source', accessor: r => r.source_label },
                 { header: 'Gross Amount', accessor: r => csvCurrency(r.gross_amount) },
-                { header: 'Rate', accessor: r => `${(r.commission_rate * 100).toFixed(0)}%` },
+                { header: 'Rate', accessor: r => r.commission_rate ? `${(r.commission_rate * 100).toFixed(0)}%` : 'Fixed' },
                 { header: 'Commission', accessor: r => csvCurrency(r.commission_amount) },
                 { header: 'Status', accessor: r => r.is_paid ? 'Paid' : 'Unpaid' },
                 { header: 'Paid At', accessor: r => csvDate(r.paid_at) },
@@ -263,7 +263,7 @@ export default function CommissionsPage() {
                     <td className="px-5 py-4"><span className="text-sm text-brand-500">{formatDate(c.created_at)}</span></td>
                     <td className="px-5 py-4"><span className="text-xs text-brand-400">{c.source_label}</span></td>
                     <td className="px-5 py-4 text-right"><span className="text-sm text-brand-600">{formatCurrency(c.gross_amount)}</span></td>
-                    <td className="px-5 py-4 text-right"><span className="text-sm text-brand-600">{(c.commission_rate * 100).toFixed(0)}%</span></td>
+                    <td className="px-5 py-4 text-right"><span className="text-sm text-brand-600">{c.commission_rate ? `${(c.commission_rate * 100).toFixed(0)}%` : 'Fixed'}</span></td>
                     <td className="px-5 py-4 text-right"><span className="text-sm font-semibold text-brand-800">{formatCurrency(c.commission_amount)}</span></td>
                     <td className="px-5 py-4">
                       <Badge variant={c.is_paid ? 'success' : 'warning'} size="sm">

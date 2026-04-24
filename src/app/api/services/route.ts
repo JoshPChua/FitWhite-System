@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { branch_id, name, description, price, duration_minutes, category } = body;
+    const { branch_id, name, description, price, duration_minutes, category, default_session_count } = body;
 
     if (!branch_id || !name || price === undefined) {
       return NextResponse.json(
@@ -65,7 +65,14 @@ export async function POST(request: NextRequest) {
     const adminClient = createAdminClient();
     const { data: service, error } = await adminClient
       .from('services')
-      .insert({ branch_id, name, description: description || null, price, duration_minutes: duration_minutes || null, category: category || null })
+      .insert({
+        branch_id, name,
+        description: description || null,
+        price,
+        duration_minutes: duration_minutes || null,
+        category: category || null,
+        default_session_count: parseInt(default_session_count) || 1,
+      })
       .select('*')
       .single();
 

@@ -45,6 +45,7 @@ export async function PATCH(
     if (body.duration_minutes !== undefined) updateData.duration_minutes = body.duration_minutes;
     if (body.category !== undefined) updateData.category = body.category;
     if (body.is_active !== undefined) updateData.is_active = body.is_active;
+    if (body.default_session_count !== undefined) updateData.default_session_count = parseInt(body.default_session_count) || 1;
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 });

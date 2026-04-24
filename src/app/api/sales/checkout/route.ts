@@ -43,6 +43,10 @@ export async function POST(request: NextRequest) {
       notes = null,
       attending_doctor_id = null,
       payment_type = 'full',
+      // Phase 5: commission override + session count
+      commission_mode = 'default',
+      commission_value = null,
+      total_sessions = null,
     } = body as {
       branch_id: string;
       customer_id?: string | null;
@@ -62,6 +66,9 @@ export async function POST(request: NextRequest) {
       notes?: string | null;
       attending_doctor_id?: string | null;
       payment_type?: 'full' | 'installment' | 'package_use';
+      commission_mode?: 'default' | 'percent' | 'fixed';
+      commission_value?: number | null;
+      total_sessions?: number | null;
     };
 
     // ─── Basic validation ────────────────────────────────────
@@ -277,6 +284,8 @@ export async function POST(request: NextRequest) {
         shift_id: shiftId,
         attending_doctor_id: attending_doctor_id || null,
         payment_type,
+        commission_mode: commission_mode !== 'default' ? commission_mode : null,
+        commission_value: commission_value ?? null,
       } as Record<string, unknown>)
       .select('id')
       .single();
@@ -462,32 +471,52 @@ export async function POST(request: NextRequest) {
     // ─── Doctor commission for direct service sales ───────────
 
     if (attending_doctor_id) {
-      const { data: doctorProfile } = await adminClient
-        .from('profiles')
-        .select('id, is_doctor, default_commission_rate')
+      // Phase 5: look up doctor from standalone doctors table
+      const { data: doctorRecord } = await adminClient
+        .from('doctors')
+        .select('id, full_name, default_commission_type, default_commission_value')
         .eq('id', attending_doctor_id)
         .single();
 
-      if (doctorProfile && (doctorProfile as Record<string, unknown>).is_doctor) {
-        const doc = doctorProfile as Record<string, unknown>;
-        const rate = doc.default_commission_rate as number | null;
+      if (doctorRecord) {
+        const doc = doctorRecord as Record<string, unknown>;
+        const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
 
-        if (rate && rate > 0) {
-          const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
-          for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
-            const matchingSaleItem = saleItemsData.find(
-              si => si.service_id === svcItem.id
-            );
-            const grossAmount = svcItem.unit_price * svcItem.quantity;
-            const commAmount = grossAmount * rate;
+        for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
+          const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
+          const grossAmount = svcItem.unit_price * svcItem.quantity;
 
+          // Determine commission: POS override takes priority, then doctor default
+          let commAmount = 0;
+          let commRate: number | null = null;
+
+          if (commission_mode === 'fixed' && commission_value != null) {
+            // Fixed amount override — use exact value
+            commAmount = commission_value;
+          } else if (commission_mode === 'percent' && commission_value != null) {
+            // Percentage override — normalize if > 1 (e.g. 30 → 0.30)
+            commRate = commission_value > 1 ? commission_value / 100 : commission_value;
+            commAmount = grossAmount * commRate;
+          } else {
+            // Default: use doctor's default commission
+            const defType = doc.default_commission_type as string;
+            const defVal = doc.default_commission_value as number || 0;
+            if (defType === 'fixed') {
+              commAmount = defVal;
+            } else {
+              commRate = defVal;
+              commAmount = grossAmount * defVal;
+            }
+          }
+
+          if (commAmount > 0) {
             await adminClient.from('doctor_commissions').insert({
               branch_id,
               doctor_id: attending_doctor_id,
               sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
               gross_amount: grossAmount,
-              commission_rate: rate,
-              commission_amount: commAmount,
+              commission_rate: commRate,
+              commission_amount: Math.round(commAmount * 100) / 100,
             } as Record<string, unknown>);
           }
         }
@@ -502,10 +531,8 @@ export async function POST(request: NextRequest) {
     if (payment_type === 'installment' && customer_id) {
       const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
 
-      // Filter to multi-session service items eligible for packages
-      const packageEligibleItems = verifiedItems.filter(
-        i => i.item_type === 'service' && (i.default_session_count || 1) > 1
-      );
+      // Phase 5: ALL installment service items create packages (removed >1 guard)
+      const packageEligibleItems = verifiedItems.filter(i => i.item_type === 'service');
 
       const totalPackageCost = packageEligibleItems.reduce(
         (sum, i) => sum + i.unit_price * i.quantity, 0
@@ -515,7 +542,8 @@ export async function POST(request: NextRequest) {
 
       for (let idx = 0; idx < packageEligibleItems.length; idx++) {
         const svcItem = packageEligibleItems[idx];
-        const sessionCount = svcItem.default_session_count || 1;
+        // Phase 5: use POS-provided total_sessions override, else service default
+        const sessionCount = total_sessions || svcItem.default_session_count || 1;
         const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
         const itemTotal = svcItem.unit_price * svcItem.quantity;
         const isLast = idx === packageEligibleItems.length - 1;

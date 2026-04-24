@@ -145,31 +145,38 @@ export async function POST(
       }
     }
 
-    // ── Doctor commission ──
+    // ── Doctor commission (Phase 5: use standalone doctors table) ──
     if (doctor_id) {
-      const { data: doctorProfile } = await adminClient
-        .from('profiles')
-        .select('id, is_doctor, default_commission_rate')
+      const { data: doctorRecord } = await adminClient
+        .from('doctors')
+        .select('id, full_name, default_commission_type, default_commission_value')
         .eq('id', doctor_id)
         .single();
 
-      if (doctorProfile) {
-        const doc = doctorProfile as Record<string, unknown>;
-        if (doc.is_doctor) {
-          const grossAmount = (pkgData.total_price as number) / (pkgData.total_sessions as number) * sessions_count;
-          const rate = doc.default_commission_rate as number | null;
-          const commissionAmount = rate ? grossAmount * rate : 0;
+      if (doctorRecord) {
+        const doc = doctorRecord as Record<string, unknown>;
+        const grossAmount = (pkgData.total_price as number) / (pkgData.total_sessions as number) * sessions_count;
+        const defType = doc.default_commission_type as string;
+        const defVal = doc.default_commission_value as number || 0;
+        let commAmount = 0;
+        let commRate: number | null = null;
 
-          if (commissionAmount > 0) {
-            await adminClient.from('doctor_commissions').insert({
-              branch_id: branchId,
-              doctor_id,
-              package_session_id: sessionData.id as string,
-              gross_amount: grossAmount,
-              commission_rate: rate,
-              commission_amount: commissionAmount,
-            } as Record<string, unknown>);
-          }
+        if (defType === 'fixed') {
+          commAmount = defVal;
+        } else {
+          commRate = defVal;
+          commAmount = grossAmount * defVal;
+        }
+
+        if (commAmount > 0) {
+          await adminClient.from('doctor_commissions').insert({
+            branch_id: branchId,
+            doctor_id,
+            package_session_id: sessionData.id as string,
+            gross_amount: grossAmount,
+            commission_rate: commRate,
+            commission_amount: Math.round(commAmount * 100) / 100,
+          } as Record<string, unknown>);
         }
       }
     }
@@ -223,7 +230,7 @@ export async function GET(
       .select(`
         *,
         performer:performed_by (first_name, last_name),
-        doctor:doctor_id (first_name, last_name)
+        doctor:doctor_id (full_name)
       `)
       .eq('package_id', packageId)
       .order('created_at', { ascending: false });

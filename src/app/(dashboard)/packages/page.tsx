@@ -50,8 +50,7 @@ interface PackagePayment {
 
 interface Doctor {
   id: string;
-  first_name: string;
-  last_name: string;
+  full_name: string;
 }
 
 // ─── Component ──────────────────────────────────────────────
@@ -117,7 +116,7 @@ export default function PackagesPage() {
             ? (p.services as Record<string, unknown>).name as string
             : 'Unknown',
           doctor_name: p.doctors
-            ? `${(p.doctors as Record<string, unknown>).first_name} ${(p.doctors as Record<string, unknown>).last_name}`
+            ? (p.doctors as Record<string, unknown>).full_name as string
             : null,
         })));
       }
@@ -132,16 +131,17 @@ export default function PackagesPage() {
 
   // Fetch doctors for session modal
   useEffect(() => {
+    const branchId = selectedBranch?.id || profile?.branch_id;
+    if (!branchId) return;
     const fetchDoctors = async () => {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, first_name, last_name')
-        .eq('is_doctor', true)
-        .eq('is_active', true);
-      setDoctors((data || []) as Doctor[]);
+      try {
+        const res = await fetch(`/api/doctors?branch_id=${branchId}&active=true`);
+        const json = await res.json();
+        setDoctors((json.data || []) as Doctor[]);
+      } catch { /* ignore */ }
     };
     fetchDoctors();
-  }, [supabase]);
+  }, [selectedBranch?.id, profile?.branch_id]);
 
   // ─── Package Detail ──────────────────────────────────────
 
@@ -165,7 +165,7 @@ export default function PackagesPage() {
           ? `${(s.performer as Record<string, unknown>).first_name} ${(s.performer as Record<string, unknown>).last_name}`
           : 'Unknown',
         doctor_name: s.doctor
-          ? `${(s.doctor as Record<string, unknown>).first_name} ${(s.doctor as Record<string, unknown>).last_name}`
+          ? (s.doctor as Record<string, unknown>).full_name as string
           : null,
       })));
 
@@ -551,7 +551,7 @@ export default function PackagesPage() {
               className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
                          focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all">
               <option value="">No doctor</option>
-              {doctors.map(d => <option key={d.id} value={d.id}>Dr. {d.first_name} {d.last_name}</option>)}
+              {doctors.map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
             </select>
           </div>
 

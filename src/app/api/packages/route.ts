@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
         *,
         customers:customer_id (id, first_name, last_name, phone),
         services:service_id (id, name, price, category),
-        doctors:attending_doctor_id (id, first_name, last_name)
+        doctors:attending_doctor_id (id, full_name)
       `)
       .order('created_at', { ascending: false });
 

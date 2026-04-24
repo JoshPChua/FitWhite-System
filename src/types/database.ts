@@ -829,6 +829,26 @@ export type InsertDoctorCommission = Omit<
 > & { id?: string };
 export type InsertInventoryLog = Omit<InventoryLog, 'id' | 'created_at'> & { id?: string };
 
+// ─── Phase 5: Standalone Doctor (no auth required) ──────────
+
+export type CommissionType = 'percent' | 'fixed';
+
+export interface Doctor {
+  id: string;
+  branch_id: string;
+  full_name: string;
+  specialty: string | null;
+  default_commission_type: CommissionType;
+  default_commission_value: number;
+  is_active: boolean;
+  notes: string | null;
+  profile_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type InsertDoctor = Omit<Doctor, 'id' | 'created_at' | 'updated_at'> & { id?: string };
+
 // ─── Auth context type (used throughout the app) ────────────
 
 export interface AuthUser {

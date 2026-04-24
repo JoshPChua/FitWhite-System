@@ -62,8 +62,9 @@ interface CompletedSale {
 
 interface Doctor {
   id: string;
-  first_name: string;
-  last_name: string;
+  full_name: string;
+  default_commission_type: 'percent' | 'fixed';
+  default_commission_value: number;
 }
 
 const PAYMENT_LABELS: Record<PaymentMethod, string> = {
@@ -114,10 +115,13 @@ export default function POSPage() {
   const [completedSale, setCompletedSale] = useState<CompletedSale | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
 
-  // Phase 4: Doctor & Payment Type
+  // Phase 5: Doctor, Commission Override, Session Count, Payment Type
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [attendingDoctorId, setAttendingDoctorId] = useState<string>('');
   const [paymentType, setPaymentType] = useState<'full' | 'installment'>('full');
+  const [commissionMode, setCommissionMode] = useState<'default' | 'percent' | 'fixed'>('default');
+  const [commissionValue, setCommissionValue] = useState<string>('');
+  const [sessionCountOverride, setSessionCountOverride] = useState<string>('');
 
   // Extra consumables modal
   const [showExtraConsumable, setShowExtraConsumable] = useState(false);
@@ -234,17 +238,16 @@ export default function POSPage() {
   // ─── Fetch Doctors (for commission tracking) ──────────────
 
   useEffect(() => {
-    if (!ENABLE_DOCTOR_COMMISSIONS) return;
+    if (!ENABLE_DOCTOR_COMMISSIONS || !posBranch?.id) return;
     const fetchDoctors = async () => {
-      const { data } = await supabase
-        .from('profiles')
-        .select('id, first_name, last_name')
-        .eq('is_doctor', true)
-        .eq('is_active', true);
-      setDoctors((data || []) as Doctor[]);
+      try {
+        const res = await fetch(`/api/doctors?branch_id=${posBranch.id}&active=true`);
+        const json = await res.json();
+        setDoctors((json.data || []) as Doctor[]);
+      } catch { /* ignore */ }
     };
     fetchDoctors();
-  }, [supabase]);
+  }, [posBranch?.id]);
 
   // ─── Cart ─────────────────────────────────────────────────
 
@@ -383,6 +386,9 @@ export default function POSPage() {
           notes: notes || null,
           attending_doctor_id: attendingDoctorId || null,
           payment_type: paymentType,
+          commission_mode: commissionMode,
+          commission_value: commissionMode !== 'default' && commissionValue ? Number(commissionValue) : null,
+          total_sessions: sessionCountOverride ? Number(sessionCountOverride) : null,
         }),
       });
 
@@ -418,6 +424,9 @@ export default function POSPage() {
       clearCart();
       setAttendingDoctorId('');
       setPaymentType('full');
+      setCommissionMode('default');
+      setCommissionValue('');
+      setSessionCountOverride('');
     } catch {
       setPaymentError('Network error — please try again');
     } finally {
@@ -673,21 +682,73 @@ export default function POSPage() {
           )}
         </div>
 
-        {/* Doctor & Payment Type (Phase 4) */}
+        {/* Doctor, Commission, Sessions, Payment Type (Phase 5) */}
         {(ENABLE_DOCTOR_COMMISSIONS || cart.some(l => l.item_type === 'service')) && (
-          <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-4 py-3 flex-shrink-0 space-y-2">
+          <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-4 py-3 flex-shrink-0 space-y-2.5">
             {/* Attending Doctor */}
-            {ENABLE_DOCTOR_COMMISSIONS && doctors.length > 0 && (
+            {ENABLE_DOCTOR_COMMISSIONS && (
               <div>
                 <label className="block text-[10px] font-semibold text-brand-400 uppercase tracking-wide mb-1">Attending Doctor</label>
-                <select value={attendingDoctorId} onChange={e => setAttendingDoctorId(e.target.value)}
+                <select value={attendingDoctorId} onChange={e => {
+                  setAttendingDoctorId(e.target.value);
+                  // Auto-set commission mode from doctor default
+                  const doc = doctors.find(d => d.id === e.target.value);
+                  if (doc && doc.default_commission_value > 0) {
+                    setCommissionMode('default');
+                    setCommissionValue('');
+                  } else {
+                    setCommissionMode('default');
+                    setCommissionValue('');
+                  }
+                }}
                   className="w-full px-3 py-2 rounded-xl border border-brand-200 bg-surface-50 text-sm text-brand-900
                              focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all">
                   <option value="">No doctor</option>
-                  {doctors.map(d => <option key={d.id} value={d.id}>Dr. {d.first_name} {d.last_name}</option>)}
+                  {doctors.map(d => <option key={d.id} value={d.id}>{d.full_name}</option>)}
                 </select>
               </div>
             )}
+
+            {/* Commission Override */}
+            {attendingDoctorId && cart.some(l => l.item_type === 'service') && (
+              <div>
+                <label className="block text-[10px] font-semibold text-brand-400 uppercase tracking-wide mb-1">Commission</label>
+                <div className="flex rounded-xl border border-brand-200 overflow-hidden mb-1.5">
+                  {(['default', 'percent', 'fixed'] as const).map(mode => (
+                    <button key={mode} onClick={() => { setCommissionMode(mode); if (mode === 'default') setCommissionValue(''); }}
+                      className={`flex-1 py-1.5 text-[10px] font-medium transition-colors ${commissionMode === mode ? 'bg-brand-600 text-white' : 'text-brand-500 hover:bg-brand-50'}`}>
+                      {mode === 'default' ? 'Default' : mode === 'percent' ? '%' : '₱ Fixed'}
+                    </button>
+                  ))}
+                </div>
+                {commissionMode === 'default' && (() => {
+                  const doc = doctors.find(d => d.id === attendingDoctorId);
+                  if (!doc) return null;
+                  const label = doc.default_commission_type === 'percent'
+                    ? `${(doc.default_commission_value * 100).toFixed(0)}%`
+                    : `₱${doc.default_commission_value.toLocaleString()}`;
+                  return <p className="text-[10px] text-brand-500">Using doctor default: <span className="font-semibold">{label}</span></p>;
+                })()}
+                {commissionMode !== 'default' && (
+                  <input type="number" step="any" value={commissionValue}
+                    onChange={e => setCommissionValue(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-brand-200 text-sm focus:outline-none focus:ring-2 focus:ring-brand-400/50"
+                    placeholder={commissionMode === 'percent' ? 'e.g. 30 for 30%' : 'Fixed amount in ₱'} />
+                )}
+              </div>
+            )}
+
+            {/* Session Count Override */}
+            {cart.some(l => l.item_type === 'service') && (
+              <div>
+                <label className="block text-[10px] font-semibold text-brand-400 uppercase tracking-wide mb-1">Total Sessions</label>
+                <input type="number" min="1" value={sessionCountOverride}
+                  onChange={e => setSessionCountOverride(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-brand-200 text-sm focus:outline-none focus:ring-2 focus:ring-brand-400/50"
+                  placeholder="Leave blank for service default" />
+              </div>
+            )}
+
             {/* Payment Type */}
             {cart.some(l => l.item_type === 'service') && customer && (
               <div>
@@ -703,7 +764,7 @@ export default function POSPage() {
                   </button>
                 </div>
                 {paymentType === 'installment' && (
-                  <p className="text-[10px] text-amber-600 mt-1">Partial payment accepted — a package will be created for multi-session services</p>
+                  <p className="text-[10px] text-amber-600 mt-1">Partial payment accepted — a package will be created for tracking</p>
                 )}
               </div>
             )}

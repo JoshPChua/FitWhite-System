@@ -93,6 +93,9 @@ function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
   if (ENABLE_PATIENT_PACKAGES) {
     clinicItems.push({ href: '/packages', label: 'Packages', icon: Package });
   }
+  if (ENABLE_DOCTOR_COMMISSIONS) {
+    clinicItems.push({ href: '/doctors', label: 'Doctors', icon: Stethoscope });
+  }
   nav.push({ id: 'clinic', label: 'Clinic', icon: Stethoscope, items: clinicItems });
 
   // ─── Finance group ────────────────────────────────────

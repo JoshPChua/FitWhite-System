@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
       .from('doctor_commissions')
       .select(`
         *,
-        doctor:doctor_id (id, first_name, last_name, default_commission_rate),
+        doctor:doctor_id (id, full_name, default_commission_type, default_commission_value),
         session:package_session_id (id, created_at, package_id),
         sale_item:sale_item_id (id, name, sale_id)
       `)
