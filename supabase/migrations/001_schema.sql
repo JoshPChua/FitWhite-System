@@ -398,7 +398,7 @@ DECLARE
 BEGIN
   today_str := TO_CHAR(NOW(), 'YYYYMMDD');
   SELECT COALESCE(MAX(
-    CAST(SUBSTRING(receipt_number FROM LENGTH(branch_code) + 10) AS INT)
+    CAST(SUBSTRING(receipt_number FROM LENGTH(branch_code) + 11) AS INT)
   ), 0) + 1
   INTO seq_val
   FROM sales
