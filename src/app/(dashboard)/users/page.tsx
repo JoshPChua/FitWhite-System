@@ -203,13 +203,9 @@ export default function UsersPage() {
           return;
         }
 
-        const createPayload = {
-          ...formData,
-          is_doctor: formData.is_doctor,
-          default_commission_rate: formData.default_commission_rate
-            ? parseFloat(formData.default_commission_rate)
-            : null,
-        };
+        // Doctor fields are managed via Clinic → Doctors, not here
+        const { is_doctor: _d, default_commission_rate: _c, ...cleanFormData } = formData;
+        const createPayload = cleanFormData;
 
         const res = await fetch('/api/users', {
           method: 'POST',
@@ -238,10 +234,7 @@ export default function UsersPage() {
         if (formData.role !== editingUser.role) updates.role = formData.role;
         if (formData.branch_id !== editingUser.branch_id) updates.branch_id = formData.branch_id;
 
-        // Doctor fields
-        if (formData.is_doctor !== (editingUser.is_doctor || false)) updates.is_doctor = formData.is_doctor;
-        const parsedRate = formData.default_commission_rate ? parseFloat(formData.default_commission_rate) : null;
-        if (parsedRate !== editingUser.default_commission_rate) updates.default_commission_rate = parsedRate;
+        // Doctor fields are managed via Clinic → Doctors (not editable here)
 
         if (Object.keys(updates).length === 0) {
           setFormError('No changes detected');
@@ -782,41 +775,24 @@ export default function UsersPage() {
             </div>
           )}
 
-          {/* Doctor Fields (Phase 4) */}
-          {ENABLE_DOCTOR_COMMISSIONS && (
-            <div className="bg-surface-50 rounded-xl p-4 space-y-3 border border-brand-100/50">
+          {/* Doctor indicator (read-only — managed via Clinic → Doctors) */}
+          {formMode === 'edit' && formData.is_doctor && (
+            <div className="bg-blue-50 rounded-xl p-4 border border-blue-200">
               <div className="flex items-center gap-3">
                 <input
                   type="checkbox"
                   id="is_doctor"
-                  checked={formData.is_doctor}
-                  onChange={(e) => setFormData({ ...formData, is_doctor: e.target.checked })}
-                  className="w-4 h-4 rounded border-brand-300 text-brand-600 focus:ring-brand-500"
+                  checked={true}
+                  disabled
+                  className="w-4 h-4 rounded border-brand-300 text-brand-600 opacity-60 cursor-not-allowed"
                 />
-                <label htmlFor="is_doctor" className="text-sm font-medium text-brand-800">
-                  This staff member is a Doctor
+                <label htmlFor="is_doctor" className="text-sm font-medium text-blue-800">
+                  This staff member is flagged as a Doctor
                 </label>
               </div>
-              {formData.is_doctor && (
-                <div>
-                  <label className="block text-sm font-medium text-brand-800 mb-1.5">Default Commission Rate</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="1"
-                      value={formData.default_commission_rate}
-                      onChange={(e) => setFormData({ ...formData, default_commission_rate: e.target.value })}
-                      placeholder="e.g. 30"
-                      className="w-32 px-4 py-2.5 rounded-xl border border-brand-200 bg-white text-brand-900 placeholder:text-brand-300
-                                 focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all duration-200"
-                    />
-                    <span className="text-sm text-brand-500">%</span>
-                  </div>
-                  <p className="text-xs text-brand-400 mt-1">Commission calculated as percentage of service gross amount</p>
-                </div>
-              )}
+              <p className="text-xs text-blue-600 mt-2">
+                Doctor profiles are now managed in <strong>Clinic → Doctors</strong>. Commission rates, specialties, and doctor settings are configured there.
+              </p>
             </div>
           )}
 

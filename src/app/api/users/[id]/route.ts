@@ -38,7 +38,7 @@ export async function PATCH(
     }
 
     const body = await request.json();
-    const { first_name, last_name, role, branch_id, is_active, is_doctor, default_commission_rate } = body;
+    const { first_name, last_name, role, branch_id, is_active } = body;
 
     // Managers can only update staff in their branch
     if (callerProfile.role === 'manager') {
@@ -91,18 +91,8 @@ export async function PATCH(
     if (branch_id !== undefined) updateData.branch_id = branch_id;
     if (is_active !== undefined) updateData.is_active = is_active;
 
-    // Doctor fields
-    if (is_doctor !== undefined) updateData.is_doctor = !!is_doctor;
-    if (default_commission_rate !== undefined) {
-      // Normalize: if > 1, assume percentage input (e.g. 30 → 0.30)
-      if (default_commission_rate === null) {
-        updateData.default_commission_rate = null;
-      } else {
-        updateData.default_commission_rate = default_commission_rate > 1
-          ? default_commission_rate / 100
-          : default_commission_rate;
-      }
-    }
+    // Doctor fields (is_doctor, default_commission_rate) are now managed
+    // exclusively via the standalone doctors table — not written here.
 
     if (Object.keys(updateData).length === 0) {
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 });

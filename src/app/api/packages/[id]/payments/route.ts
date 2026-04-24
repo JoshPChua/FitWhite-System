@@ -125,6 +125,7 @@ export async function POST(
  * GET /api/packages/[id]/payments
  *
  * Lists all payment records for a given package.
+ * Requires caller profile lookup + branch isolation.
  */
 export async function GET(
   _request: NextRequest,
@@ -136,7 +137,33 @@ export async function GET(
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+    // Caller profile + active check
+    const { data: rawProfile } = await supabase
+      .from('profiles').select('*').eq('id', user.id).single();
+    const caller = rawProfile as Profile | null;
+    if (!caller || !caller.is_active) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const adminClient = createAdminClient();
+
+    // Fetch package for branch isolation
+    const { data: pkg } = await adminClient
+      .from('patient_packages')
+      .select('branch_id')
+      .eq('id', packageId)
+      .single();
+
+    if (!pkg) {
+      return NextResponse.json({ error: 'Package not found' }, { status: 404 });
+    }
+
+    const pkgBranch = (pkg as Record<string, unknown>).branch_id as string;
+
+    // Branch isolation: non-owners can only see their own branch
+    if (caller.role !== 'owner' && caller.branch_id !== pkgBranch) {
+      return NextResponse.json({ error: 'Access denied: package belongs to another branch' }, { status: 403 });
+    }
 
     const { data, error } = await adminClient
       .from('package_payments')
@@ -157,3 +184,4 @@ export async function GET(
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
+

@@ -6,9 +6,9 @@ import type { Profile } from '@/types/database';
 /**
  * POST /api/packages/[id]/sessions
  *
- * Consumes session(s) from a patient package.
- * Auto-deducts service BOM consumables from inventory.
- * Auto-creates doctor commission if attending doctor is specified.
+ * Consumes session(s) from a patient package via atomic Postgres RPC.
+ * All writes (session, BOM deduction, inventory_logs, commission) happen
+ * inside a single transaction. Any failure → automatic full rollback.
  *
  * Body: { sessions_count?, doctor_id?, notes? }
  */
@@ -46,10 +46,10 @@ export async function POST(
 
     const adminClient = createAdminClient();
 
-    // Fetch the package
+    // Fetch the package for branch isolation check
     const { data: pkg } = await adminClient
       .from('patient_packages')
-      .select('*')
+      .select('branch_id')
       .eq('id', packageId)
       .single();
 
@@ -57,154 +57,43 @@ export async function POST(
       return NextResponse.json({ error: 'Package not found' }, { status: 404 });
     }
 
-    const pkgData = pkg as Record<string, unknown>;
-
-    if (pkgData.status !== 'active') {
-      return NextResponse.json({ error: `Package is ${pkgData.status} — cannot consume sessions` }, { status: 400 });
-    }
-
-    const branchId = pkgData.branch_id as string;
+    const branchId = (pkg as Record<string, unknown>).branch_id as string;
 
     // Branch isolation
     if (caller.role !== 'owner' && caller.branch_id !== branchId) {
       return NextResponse.json({ error: 'Cannot consume sessions for another branch' }, { status: 403 });
     }
 
-    const sessionsRemaining = (pkgData.total_sessions as number) - (pkgData.sessions_used as number);
-    if (sessions_count > sessionsRemaining) {
-      return NextResponse.json({
-        error: `Insufficient sessions. Remaining: ${sessionsRemaining}, Requested: ${sessions_count}`
-      }, { status: 400 });
+    // ─── Atomic RPC: session + BOM + commission in one transaction ───
+    const { data: result, error: rpcError } = await adminClient
+      .rpc('consume_package_session', {
+        p_package_id: packageId,
+        p_branch_id: branchId,
+        p_performed_by: user.id,
+        p_doctor_id: doctor_id || null,
+        p_sessions_count: sessions_count,
+        p_notes: notes || null,
+      });
+
+    if (rpcError) {
+      // Surface the Postgres error message directly
+      return NextResponse.json({ error: rpcError.message }, { status: 500 });
     }
 
-    // Insert session record (trigger sync_package_sessions_used will update the package)
-    const { data: session, error: sessionError } = await adminClient
-      .from('package_sessions')
-      .insert({
-        package_id: packageId,
-        branch_id: branchId,
-        performed_by: user.id,
-        doctor_id: doctor_id || null,
-        sessions_count,
-        notes: notes || null,
-      } as Record<string, unknown>)
-      .select('*')
-      .single();
+    const rpcResult = result as Record<string, unknown>;
 
-    if (sessionError) {
-      return NextResponse.json({ error: sessionError.message }, { status: 500 });
-    }
-
-    const sessionData = session as Record<string, unknown>;
-    const serviceId = pkgData.service_id as string;
-
-    // ── BOM deduction: auto-deduct consumables for this service ──
-    const { data: bomItems } = await adminClient
-      .from('service_consumables')
-      .select('product_id, quantity')
-      .eq('service_id', serviceId);
-
-    if (bomItems && bomItems.length > 0) {
-      for (const bomItem of bomItems as Record<string, unknown>[]) {
-        const productId = bomItem.product_id as string;
-        const bomQty = (bomItem.quantity as number) * sessions_count;
-
-        // Get current inventory
-        const { data: inv } = await adminClient
-          .from('inventory')
-          .select('id, quantity')
-          .eq('product_id', productId)
-          .eq('branch_id', branchId)
-          .single();
-
-        if (inv) {
-          const invData = inv as Record<string, unknown>;
-          const currentQty = invData.quantity as number;
-          const newQty = Math.max(0, currentQty - bomQty);
-
-          // Update inventory
-          await adminClient
-            .from('inventory')
-            .update({ quantity: newQty } as Record<string, unknown>)
-            .eq('id', invData.id as string);
-
-          // Write inventory_logs
-          await adminClient.from('inventory_logs').insert({
-            inventory_id: invData.id as string,
-            product_id: productId,
-            branch_id: branchId,
-            performed_by: user.id,
-            source: 'service_bom',
-            quantity_delta: -bomQty,
-            quantity_before: currentQty,
-            quantity_after: newQty,
-            package_session_id: sessionData.id as string,
-            notes: `BOM deduction for session on package ${packageId}`,
-          } as Record<string, unknown>);
-        }
-      }
-    }
-
-    // ── Doctor commission (Phase 5: use standalone doctors table) ──
-    if (doctor_id) {
-      const { data: doctorRecord } = await adminClient
-        .from('doctors')
-        .select('id, full_name, default_commission_type, default_commission_value')
-        .eq('id', doctor_id)
-        .single();
-
-      if (doctorRecord) {
-        const doc = doctorRecord as Record<string, unknown>;
-        const grossAmount = Number(pkgData.total_price) / Number(pkgData.total_sessions) * sessions_count;
-        const defType = doc.default_commission_type as string;
-        const defVal = Number(doc.default_commission_value) || 0;
-        let commAmount = 0;
-        let commRate: number | null = null;
-
-        if (defType === 'fixed') {
-          commAmount = defVal;
-        } else {
-          commRate = defVal;
-          commAmount = grossAmount * defVal;
-        }
-
-        if (commAmount > 0) {
-          const { error: commError } = await adminClient.from('doctor_commissions').insert({
-            branch_id: branchId,
-            doctor_id,
-            package_session_id: sessionData.id as string,
-            gross_amount: grossAmount,
-            commission_rate: commRate,
-            commission_amount: Math.round(commAmount * 100) / 100,
-          } as Record<string, unknown>);
-          if (commError) {
-            console.error('Session commission insert error:', commError.message);
-          }
-        }
-      }
-    }
-
-    // Check if all sessions consumed — auto-complete
-    const newSessionsUsed = (pkgData.sessions_used as number) + sessions_count;
-    if (newSessionsUsed >= (pkgData.total_sessions as number)) {
-      await adminClient
-        .from('patient_packages')
-        .update({ status: 'completed' } as Record<string, unknown>)
-        .eq('id', packageId);
-    }
-
-    // Audit log
+    // Audit log (non-critical, outside transaction)
     await adminClient.from('audit_logs').insert({
       user_id: user.id,
       branch_id: branchId,
       action_type: 'SESSION_CONSUMED',
       entity_type: 'package_session',
-      entity_id: sessionData.id as string,
-      description: `${sessions_count} session(s) consumed from package. ${sessionsRemaining - sessions_count} remaining.`,
+      entity_id: rpcResult.session_id as string,
+      description: `${sessions_count} session(s) consumed from package. ${rpcResult.sessions_remaining} remaining.${rpcResult.auto_completed ? ' Package auto-completed.' : ''}`,
       metadata: { package_id: packageId, sessions_count, doctor_id },
     } as Record<string, unknown>);
 
-    return NextResponse.json({ data: session }, { status: 201 });
+    return NextResponse.json({ data: rpcResult }, { status: 201 });
   } catch (error) {
     console.error('POST /api/packages/[id]/sessions error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
@@ -215,6 +104,7 @@ export async function POST(
  * GET /api/packages/[id]/sessions
  *
  * Lists all session records for a given package.
+ * Requires caller profile lookup + branch isolation.
  */
 export async function GET(
   _request: NextRequest,
@@ -226,7 +116,33 @@ export async function GET(
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+    // Caller profile + active check
+    const { data: rawProfile } = await supabase
+      .from('profiles').select('*').eq('id', user.id).single();
+    const caller = rawProfile as Profile | null;
+    if (!caller || !caller.is_active) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
     const adminClient = createAdminClient();
+
+    // Fetch package for branch isolation
+    const { data: pkg } = await adminClient
+      .from('patient_packages')
+      .select('branch_id')
+      .eq('id', packageId)
+      .single();
+
+    if (!pkg) {
+      return NextResponse.json({ error: 'Package not found' }, { status: 404 });
+    }
+
+    const pkgBranch = (pkg as Record<string, unknown>).branch_id as string;
+
+    // Branch isolation: non-owners can only see their own branch
+    if (caller.role !== 'owner' && caller.branch_id !== pkgBranch) {
+      return NextResponse.json({ error: 'Access denied: package belongs to another branch' }, { status: 403 });
+    }
 
     const { data, error } = await adminClient
       .from('package_sessions')

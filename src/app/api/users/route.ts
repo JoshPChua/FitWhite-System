@@ -115,15 +115,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Failed to create user' }, { status: 500 });
     }
 
-    // Normalize commission rate: convert percentage (e.g. 30) to decimal (0.30)
-    let commissionRate: number | null = null;
-    if (is_doctor && default_commission_rate !== null && default_commission_rate !== undefined) {
-      commissionRate = default_commission_rate > 1
-        ? default_commission_rate / 100
-        : default_commission_rate;
-    }
+    // Doctor fields (is_doctor, default_commission_rate) are now managed
+    // exclusively via the standalone doctors table — not written here.
 
-    // Update the profile with branch, role, and doctor fields (trigger creates a basic profile)
+    // Update the profile with branch and role (trigger creates a basic profile)
     const { error: profileError } = await adminClient
       .from('profiles')
       .update({
@@ -132,8 +127,6 @@ export async function POST(request: NextRequest) {
         role,
         branch_id,
         is_active: true,
-        is_doctor: !!is_doctor,
-        default_commission_rate: commissionRate,
       })
       .eq('id', authData.user.id);
 
@@ -154,8 +147,8 @@ export async function POST(request: NextRequest) {
       action_type: 'CREATE_USER',
       entity_type: 'user',
       entity_id: authData.user.id,
-      description: `Created user ${first_name} ${last_name} (${role}${is_doctor ? ', doctor' : ''}) for branch`,
-      metadata: { email, role, branch_id, is_doctor, default_commission_rate: commissionRate },
+      description: `Created user ${first_name} ${last_name} (${role}) for branch`,
+      metadata: { email, role, branch_id },
     });
 
     return NextResponse.json({
@@ -167,8 +160,6 @@ export async function POST(request: NextRequest) {
         last_name,
         role,
         branch_id,
-        is_doctor: !!is_doctor,
-        default_commission_rate: commissionRate,
       },
     });
   } catch (error) {
