@@ -22,7 +22,15 @@ CREATE TABLE IF NOT EXISTS doctors (
 CREATE INDEX IF NOT EXISTS idx_doctors_branch ON doctors(branch_id);
 CREATE INDEX IF NOT EXISTS idx_doctors_active ON doctors(branch_id, is_active);
 
--- Auto-update updated_at
+-- Auto-update updated_at (create helper function if it doesn't exist)
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE TRIGGER set_doctors_updated_at
   BEFORE UPDATE ON doctors
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
