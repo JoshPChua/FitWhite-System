@@ -155,9 +155,9 @@ export async function POST(
 
       if (doctorRecord) {
         const doc = doctorRecord as Record<string, unknown>;
-        const grossAmount = (pkgData.total_price as number) / (pkgData.total_sessions as number) * sessions_count;
+        const grossAmount = Number(pkgData.total_price) / Number(pkgData.total_sessions) * sessions_count;
         const defType = doc.default_commission_type as string;
-        const defVal = doc.default_commission_value as number || 0;
+        const defVal = Number(doc.default_commission_value) || 0;
         let commAmount = 0;
         let commRate: number | null = null;
 
@@ -169,7 +169,7 @@ export async function POST(
         }
 
         if (commAmount > 0) {
-          await adminClient.from('doctor_commissions').insert({
+          const { error: commError } = await adminClient.from('doctor_commissions').insert({
             branch_id: branchId,
             doctor_id,
             package_session_id: sessionData.id as string,
@@ -177,6 +177,9 @@ export async function POST(
             commission_rate: commRate,
             commission_amount: Math.round(commAmount * 100) / 100,
           } as Record<string, unknown>);
+          if (commError) {
+            console.error('Session commission insert error:', commError.message);
+          }
         }
       }
     }

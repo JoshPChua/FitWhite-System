@@ -262,39 +262,58 @@ export async function POST(request: NextRequest) {
       .from('branches').select('code').eq('id', branch_id).single();
     const branchCode = branchData ? (branchData as Record<string, unknown>).code as string : 'FW';
 
-    const { data: receiptData } = await adminClient
-      .rpc('generate_receipt_number', { branch_code: branchCode });
-    const receiptNumber = receiptData as string;
+    // ─── Insert Sale (with receipt retry for concurrency safety) ─────
 
-    // ─── Insert Sale ─────────────────────────────────────────
+    let saleData: Record<string, unknown> | null = null;
+    let receiptNumber = '';
+    const MAX_RECEIPT_RETRIES = 3;
 
-    const { data: saleData, error: saleError } = await adminClient
-      .from('sales')
-      .insert({
-        receipt_number: receiptNumber,
-        branch_id,
-        user_id: currentUser.id,
-        customer_id: customer_id || null,
-        subtotal,
-        discount,
-        tax,
-        total,
-        status: 'completed',
-        notes: notes || null,
-        shift_id: shiftId,
-        attending_doctor_id: attending_doctor_id || null,
-        payment_type,
-        commission_mode: commission_mode !== 'default' ? commission_mode : null,
-        commission_value: commission_value ?? null,
-      } as Record<string, unknown>)
-      .select('id')
-      .single();
+    for (let attempt = 0; attempt < MAX_RECEIPT_RETRIES; attempt++) {
+      const { data: receiptData } = await adminClient
+        .rpc('generate_receipt_number', { branch_code: branchCode });
+      receiptNumber = receiptData as string;
 
-    if (saleError) {
+      const { data: insertedSale, error: saleError } = await adminClient
+        .from('sales')
+        .insert({
+          receipt_number: receiptNumber,
+          branch_id,
+          user_id: currentUser.id,
+          customer_id: customer_id || null,
+          subtotal,
+          discount,
+          tax,
+          total,
+          status: 'completed',
+          notes: notes || null,
+          shift_id: shiftId,
+          attending_doctor_id: attending_doctor_id || null,
+          payment_type,
+          commission_mode: commission_mode !== 'default' ? commission_mode : null,
+          commission_value: commission_value ?? null,
+        } as Record<string, unknown>)
+        .select('id')
+        .single();
+
+      if (!saleError) {
+        saleData = insertedSale as Record<string, unknown>;
+        break;
+      }
+
+      // If it's a duplicate key error, retry with a new receipt number
+      if (saleError.message.includes('sales_receipt_number_key') && attempt < MAX_RECEIPT_RETRIES - 1) {
+        console.warn(`Receipt number collision (${receiptNumber}), retrying... attempt ${attempt + 2}`);
+        continue;
+      }
+
       return NextResponse.json({ error: saleError.message }, { status: 500 });
     }
 
-    const saleId = (saleData as Record<string, unknown>).id as string;
+    if (!saleData) {
+      return NextResponse.json({ error: 'Failed to generate unique receipt number after retries' }, { status: 500 });
+    }
+
+    const saleId = saleData.id as string;
 
     // ─── Insert Sale Items ───────────────────────────────────
 
@@ -486,7 +505,7 @@ export async function POST(request: NextRequest) {
           const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
           const grossAmount = svcItem.unit_price * svcItem.quantity;
 
-          // Determine commission: POS override takes priority, then doctor default
+           // Determine commission: POS override takes priority, then doctor default
           let commAmount = 0;
           let commRate: number | null = null;
 
@@ -500,7 +519,7 @@ export async function POST(request: NextRequest) {
           } else {
             // Default: use doctor's default commission
             const defType = doc.default_commission_type as string;
-            const defVal = doc.default_commission_value as number || 0;
+            const defVal = Number(doc.default_commission_value) || 0;
             if (defType === 'fixed') {
               commAmount = defVal;
             } else {
@@ -510,7 +529,7 @@ export async function POST(request: NextRequest) {
           }
 
           if (commAmount > 0) {
-            await adminClient.from('doctor_commissions').insert({
+            const { error: commError } = await adminClient.from('doctor_commissions').insert({
               branch_id,
               doctor_id: attending_doctor_id,
               sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
@@ -518,6 +537,9 @@ export async function POST(request: NextRequest) {
               commission_rate: commRate,
               commission_amount: Math.round(commAmount * 100) / 100,
             } as Record<string, unknown>);
+            if (commError) {
+              console.error('Commission insert error:', commError.message);
+            }
           }
         }
       }
