@@ -228,6 +228,8 @@ export default function ServicesPage() {
         const newDuration = formData.duration_minutes ? parseInt(formData.duration_minutes) : null;
         if (newDuration !== editingService.duration_minutes) changes.duration_minutes = newDuration;
         if (formData.category !== (editingService.category || '')) changes.category = formData.category || null;
+        const newSessionCount = parseInt(formData.default_session_count) || 1;
+        if (newSessionCount !== (editingService.default_session_count || 1)) changes.default_session_count = newSessionCount;
 
         if (Object.keys(changes).length === 0) { setFormError('No changes detected'); return; }
 

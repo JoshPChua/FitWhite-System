@@ -98,8 +98,12 @@
 - **Owner** — full system access across all branches
 - **Manager** — full access within their branch only
 - **Cashier** — POS access only
-- **Doctor flag** — mark staff as doctors for commission tracking
-- Default commission rate per doctor
+
+### Doctor Management
+- Standalone `doctors` table (no Supabase Auth account required)
+- Doctors can optionally be linked to a staff `profile` via `profile_id`
+- Per-doctor configurable commission type (`percent` or `fixed`) and rate
+- Backfilled from legacy `profiles.is_doctor` during migration 006
 
 ### Doctor Commissions
 - Automatic commission calculation on service sales
@@ -222,6 +226,8 @@ cp .env.example .env.local
 #    supabase/migrations/003_phase3_schema.sql
 #    supabase/migrations/004_phase3_rls.sql
 #    supabase/migrations/005_add_void_reversal_source.sql
+#    supabase/migrations/006_doctors_table.sql
+#    supabase/migrations/007_production_hardening.sql
 
 # 4. Create the seed auth users
 npx ts-node scripts/seed-auth-users.ts
@@ -274,6 +280,8 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `003_phase3_schema.sql` | Phase 3 tables (packages, shifts, commissions, BOM) |
 | `004_phase3_rls.sql` | Phase 3 RLS policies |
 | `005_add_void_reversal_source.sql` | `void_reversal` enum value for inventory logs |
+| `006_doctors_table.sql` | Standalone doctors table, FK migration from profiles, RLS |
+| `007_production_hardening.sql` | Atomic checkout RPC, receipt counters, branch authorization |
 
 ### Table Summary
 
@@ -290,6 +298,7 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `sales` / `sale_items` / `payments` | Transaction data |
 | `patient_packages` / `package_payments` / `package_sessions` | Multi-session service packages |
 | `shifts` / `cash_movements` | Cash drawer management |
+| `doctors` | Standalone doctor records (no auth account required) |
 | `doctor_commissions` | Commission tracking per doctor per service |
 | `stock_adjustments` | Legacy inventory change log |
 | `refunds` / `refund_items` | Refund records |

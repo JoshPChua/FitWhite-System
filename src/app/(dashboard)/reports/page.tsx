@@ -167,7 +167,7 @@ export default function ReportsPage() {
         if (dateFrom) cmQuery = cmQuery.gte('created_at', dateFrom);
         const { data: cmData } = await cmQuery;
         (cmData || []).forEach((m: Record<string, unknown>) => {
-          if (m.movement_type === 'petty_cash') pettyCashTotal += Number(m.amount);
+          if (m.movement_type === 'petty_cash_out') pettyCashTotal += Number(m.amount);
           else if (m.movement_type === 'bank_deposit') bankDepositTotal += Number(m.amount);
         });
       }
