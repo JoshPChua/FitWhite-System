@@ -97,7 +97,8 @@ export async function POST(
 
     // Package state snapshots for rollback
     let savedPackagePayments: Record<string, unknown>[] = [];
-    const cancelledPackages: Array<{ id: string; previousStatus: string }> = [];
+    const cancelledPackages: Array<{ id: string; previousStatus: string; previousDownpayment: number; previousTotalPaid: number }> = [];
+    let savedCommissions: Record<string, unknown>[] = [];
 
     const rollbackVoid = async () => {
       try {
@@ -111,15 +112,23 @@ export async function POST(
         if (voidLogIds.length > 0) {
           await adminClient.from('inventory_logs').delete().in('id', voidLogIds);
         }
-        // 3. Restore cancelled packages to their previous statuses
+        // 3. Restore cancelled packages to their previous statuses and paid amounts
         for (const pkg of cancelledPackages) {
           await adminClient.from('patient_packages')
-            .update({ status: pkg.previousStatus } as Record<string, unknown>)
+            .update({
+              status: pkg.previousStatus,
+              downpayment: pkg.previousDownpayment,
+              total_paid: pkg.previousTotalPaid,
+            } as Record<string, unknown>)
             .eq('id', pkg.id);
         }
         // 4. Reinsert deleted package_payments from saved full rows
         if (savedPackagePayments.length > 0) {
           await adminClient.from('package_payments').insert(savedPackagePayments);
+        }
+        // 5. Reinsert deleted doctor commissions from saved full rows
+        if (savedCommissions.length > 0) {
+          await adminClient.from('doctor_commissions').insert(savedCommissions);
         }
       } catch (rbErr) {
         console.error('Void rollback error (sale may have inconsistent state):', rbErr);
@@ -254,7 +263,7 @@ export async function POST(
     if (saleItemIds.length > 0) {
       const { data: packages, error: pkgErr } = await adminClient
         .from('patient_packages')
-        .select('id, status')
+        .select('id, status, downpayment, total_paid')
         .in('sale_item_id', saleItemIds);
 
       if (pkgErr) {
@@ -298,13 +307,15 @@ export async function POST(
           }, { status: 500 });
         }
 
-        // Cancel the packages (store previous statuses for rollback)
+        // Cancel the packages and reset paid amounts (store previous values for rollback)
         for (const pkg of packageRecords) {
           const previousStatus = pkg.status as string;
+          const previousDownpayment = (pkg.downpayment as number) || 0;
+          const previousTotalPaid = (pkg.total_paid as number) || 0;
 
           const { error: pkgCancelErr } = await adminClient
             .from('patient_packages')
-            .update({ status: 'cancelled' } as Record<string, unknown>)
+            .update({ status: 'cancelled', downpayment: 0, total_paid: 0 } as Record<string, unknown>)
             .eq('id', pkg.id as string);
 
           if (pkgCancelErr) {
@@ -314,19 +325,36 @@ export async function POST(
             }, { status: 500 });
           }
 
-          cancelledPackages.push({ id: pkg.id as string, previousStatus });
+          cancelledPackages.push({ id: pkg.id as string, previousStatus, previousDownpayment, previousTotalPaid });
         }
       }
     }
 
     // ─── 4. Delete doctor commissions ────────────────────────
     if (saleItemIds.length > 0) {
+      // Fetch and store full commission rows BEFORE deletion (for rollback)
+      const { data: existingCommissions, error: commFetchErr } = await adminClient
+        .from('doctor_commissions')
+        .select('*')
+        .in('sale_item_id', saleItemIds);
+
+      if (commFetchErr) {
+        await rollbackVoid();
+        return NextResponse.json({
+          error: `Failed to read commissions: ${commFetchErr.message}. Sale NOT voided.`
+        }, { status: 500 });
+      }
+
+      savedCommissions = (existingCommissions || []) as Record<string, unknown>[];
+
       const { error: commDelErr } = await adminClient
         .from('doctor_commissions')
         .delete()
         .in('sale_item_id', saleItemIds);
 
       if (commDelErr) {
+        // Commissions not deleted yet, reset savedCommissions and rollback
+        savedCommissions = [];
         await rollbackVoid();
         return NextResponse.json({
           error: `Failed to delete commissions: ${commDelErr.message}. Sale NOT voided.`

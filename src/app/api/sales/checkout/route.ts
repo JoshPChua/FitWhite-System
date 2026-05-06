@@ -349,107 +349,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: itemsError.message }, { status: 500 });
     }
 
-    // ─── Doctor commission (REQUIRED — must succeed before inventory) ──
-
-    if (attending_doctor_id) {
-      const { data: doctorRecord } = await adminClient
-        .from('doctors')
-        .select('id, full_name, branch_id, is_active, default_commission_type, default_commission_value')
-        .eq('id', attending_doctor_id)
-        .single();
-
-      if (!doctorRecord) {
-        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
-        await adminClient.from('sales').delete().eq('id', saleId);
-        return NextResponse.json({ error: 'Attending doctor not found' }, { status: 400 });
-      }
-
-      const doc = doctorRecord as Record<string, unknown>;
-
-      // Doctor must be active
-      if (!(doc.is_active as boolean)) {
-        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
-        await adminClient.from('sales').delete().eq('id', saleId);
-        return NextResponse.json({ error: 'Attending doctor is inactive' }, { status: 400 });
-      }
-
-      // Doctor must belong to the sale branch
-      if (doc.branch_id !== branch_id) {
-        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
-        await adminClient.from('sales').delete().eq('id', saleId);
-        return NextResponse.json({ error: 'Attending doctor does not belong to this branch' }, { status: 400 });
-      }
-
-      const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
-
-      for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
-        const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
-        const grossAmount = svcItem.unit_price * svcItem.quantity;
-
-        // Determine commission: POS override takes priority, then doctor default
-        let commAmount = 0;
-        let commRate: number | null = null;
-
-        if (commission_mode === 'fixed' && commission_value != null) {
-          commAmount = commission_value;
-        } else if (commission_mode === 'percent' && commission_value != null) {
-          commRate = commission_value > 1 ? commission_value / 100 : commission_value;
-          commAmount = grossAmount * commRate;
-        } else {
-          const defType = doc.default_commission_type as string;
-          const defVal = Number(doc.default_commission_value) || 0;
-          if (defType === 'fixed') {
-            commAmount = defVal;
-          } else {
-            commRate = defVal;
-            commAmount = grossAmount * defVal;
-          }
-        }
-
-        if (commAmount > 0) {
-          const { error: commError } = await adminClient.from('doctor_commissions').insert({
-            branch_id,
-            doctor_id: attending_doctor_id,
-            sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
-            gross_amount: grossAmount,
-            commission_rate: commRate,
-            commission_amount: Math.round(commAmount * 100) / 100,
-          } as Record<string, unknown>);
-
-          if (commError) {
-            // HARD FAIL: commission is required. Roll back the sale.
-            console.error('Commission insert failed, rolling back sale:', commError.message);
-            await adminClient.from('sale_items').delete().eq('sale_id', saleId);
-            await adminClient.from('sales').delete().eq('id', saleId);
-            return NextResponse.json({
-              error: `Commission creation failed: ${commError.message}. Sale was not completed.`
-            }, { status: 500 });
-          }
-        }
-      }
-    }
-
-    // ─── Insert Payments ─────────────────────────────────────
-
-    const paymentsPayload = payments.map(p => ({
-      sale_id: saleId,
-      method: p.method,
-      amount: p.amount,
-      change_amount: p.change_amount ?? 0,
-      reference_number: p.reference_number ?? null,
-    }));
-
-    const { error: paymentsError } = await adminClient
-      .from('payments')
-      .insert(paymentsPayload as Record<string, unknown>[]);
-
-    if (paymentsError) {
-      await adminClient.from('sales').delete().eq('id', saleId);
-      return NextResponse.json({ error: paymentsError.message }, { status: 500 });
-    }
-
     // ─── Rollback ledger: tracks every successful stock mutation ──
-    //     Independent of inventory_logs — works even if the log insert fails.
+    //     Defined early so ALL failure paths (commissions, payments,
+    //     inventory, packages) can reuse the same cleanup logic.
 
     interface StockMutation {
       inventoryId: string;
@@ -490,6 +392,103 @@ export async function POST(request: NextRequest) {
         console.error('Rollback error (sale may be partially written):', rbErr);
       }
     };
+
+    // ─── Doctor commission (REQUIRED — must succeed before inventory) ──
+
+    if (attending_doctor_id) {
+      const { data: doctorRecord } = await adminClient
+        .from('doctors')
+        .select('id, full_name, branch_id, is_active, default_commission_type, default_commission_value')
+        .eq('id', attending_doctor_id)
+        .single();
+
+      if (!doctorRecord) {
+        await rollbackFromLedger();
+        return NextResponse.json({ error: 'Attending doctor not found' }, { status: 400 });
+      }
+
+      const doc = doctorRecord as Record<string, unknown>;
+
+      // Doctor must be active
+      if (!(doc.is_active as boolean)) {
+        await rollbackFromLedger();
+        return NextResponse.json({ error: 'Attending doctor is inactive' }, { status: 400 });
+      }
+
+      // Doctor must belong to the sale branch
+      if (doc.branch_id !== branch_id) {
+        await rollbackFromLedger();
+        return NextResponse.json({ error: 'Attending doctor does not belong to this branch' }, { status: 400 });
+      }
+
+      const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
+
+      for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
+        const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
+        const grossAmount = svcItem.unit_price * svcItem.quantity;
+
+        // Determine commission: POS override takes priority, then doctor default
+        let commAmount = 0;
+        let commRate: number | null = null;
+
+        if (commission_mode === 'fixed' && commission_value != null) {
+          commAmount = commission_value;
+        } else if (commission_mode === 'percent' && commission_value != null) {
+          commRate = commission_value > 1 ? commission_value / 100 : commission_value;
+          commAmount = grossAmount * commRate;
+        } else {
+          const defType = doc.default_commission_type as string;
+          const defVal = Number(doc.default_commission_value) || 0;
+          if (defType === 'fixed') {
+            commAmount = defVal;
+          } else {
+            commRate = defVal;
+            commAmount = grossAmount * defVal;
+          }
+        }
+
+        if (commAmount > 0) {
+          const { error: commError } = await adminClient.from('doctor_commissions').insert({
+            branch_id,
+            doctor_id: attending_doctor_id,
+            sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
+            gross_amount: grossAmount,
+            commission_rate: commRate,
+            commission_amount: Math.round(commAmount * 100) / 100,
+          } as Record<string, unknown>);
+
+          if (commError) {
+            console.error('Commission insert failed, rolling back sale:', commError.message);
+            await rollbackFromLedger();
+            return NextResponse.json({
+              error: `Commission creation failed: ${commError.message}. Sale was not completed.`
+            }, { status: 500 });
+          }
+        }
+      }
+    }
+
+    // ─── Insert Payments ─────────────────────────────────────
+
+    const paymentsPayload = payments.map(p => ({
+      sale_id: saleId,
+      method: p.method,
+      amount: p.amount,
+      change_amount: p.change_amount ?? 0,
+      reference_number: p.reference_number ?? null,
+    }));
+
+    const { error: paymentsError } = await adminClient
+      .from('payments')
+      .insert(paymentsPayload as Record<string, unknown>[]);
+
+    if (paymentsError) {
+      console.error('Payment insert failed, rolling back sale:', paymentsError.message);
+      await rollbackFromLedger();
+      return NextResponse.json({
+        error: `Payment failed: ${paymentsError.message}. Sale rolled back.`
+      }, { status: 500 });
+    }
 
     // ─── Dev-only failure injection for rollback testing ─────
     const forceFailure = process.env.NODE_ENV !== 'production'
