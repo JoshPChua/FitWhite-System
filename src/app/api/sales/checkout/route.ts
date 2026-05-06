@@ -43,10 +43,9 @@ export async function POST(request: NextRequest) {
       notes = null,
       attending_doctor_id = null,
       payment_type = 'full',
-      // Phase 5: commission override + session count
+      // Phase 5: commission override
       commission_mode = 'default',
       commission_value = null,
-      total_sessions = null,
     } = body as {
       branch_id: string;
       customer_id?: string | null;
@@ -54,6 +53,7 @@ export async function POST(request: NextRequest) {
         item_type: 'service' | 'product' | 'bundle';
         id: string;
         quantity: number;
+        session_override?: number;
       }>;
       payments: Array<{
         method: 'cash' | 'gcash' | 'card' | 'bank_transfer';
@@ -68,7 +68,6 @@ export async function POST(request: NextRequest) {
       payment_type?: 'full' | 'installment' | 'package_use';
       commission_mode?: 'default' | 'percent' | 'fixed';
       commission_value?: number | null;
-      total_sessions?: number | null;
     };
 
     // ─── Basic validation ────────────────────────────────────
@@ -123,6 +122,7 @@ export async function POST(request: NextRequest) {
       quantity: number;
       product_id?: string | null;
       default_session_count?: number;
+      session_override?: number;
     }> = [];
 
     for (const item of items) {
@@ -131,6 +131,15 @@ export async function POST(request: NextRequest) {
       }
       if (!item.id || !item.quantity || item.quantity < 1) {
         return NextResponse.json({ error: 'Each item needs a valid id and quantity ≥ 1' }, { status: 400 });
+      }
+      // Validate per-item session_override
+      if (item.session_override !== undefined) {
+        if (item.item_type !== 'service') {
+          return NextResponse.json({ error: 'session_override is only valid for service items' }, { status: 400 });
+        }
+        if (!Number.isInteger(item.session_override) || item.session_override < 1) {
+          return NextResponse.json({ error: 'session_override must be a whole number ≥ 1' }, { status: 400 });
+        }
       }
     }
 
@@ -174,6 +183,7 @@ export async function POST(request: NextRequest) {
           unit_price: record.price as number,
           quantity: item.quantity,
           default_session_count: (record.default_session_count as number) || 1,
+          session_override: item.session_override,
         });
       } else if (item.item_type === 'product') {
         verifiedItems.push({
@@ -418,7 +428,41 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: paymentsError.message }, { status: 500 });
     }
 
-    // ─── Adjust Inventory — Products (dual-write) ────────────
+    // ─── Rollback ledger: tracks every successful stock mutation ──
+    //     Independent of inventory_logs — works even if the log insert fails.
+
+    interface StockMutation {
+      inventoryId: string;
+      quantityBefore: number;
+    }
+    const stockMutations: StockMutation[] = [];
+
+    const rollbackFromLedger = async () => {
+      try {
+        // Reverse stock mutations in reverse order using snapshot values
+        for (const m of [...stockMutations].reverse()) {
+          await adminClient.from('inventory')
+            .update({ quantity: m.quantityBefore } as Record<string, unknown>)
+            .eq('id', m.inventoryId);
+        }
+        // Clean up any partial writes for this sale
+        await adminClient.from('inventory_logs').delete().eq('sale_id', saleId);
+        await adminClient.from('stock_adjustments').delete().eq('reference_id', saleId);
+        await adminClient.from('doctor_commissions').delete().eq('branch_id', branch_id);
+        await adminClient.from('payments').delete().eq('sale_id', saleId);
+        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
+        await adminClient.from('sales').delete().eq('id', saleId);
+      } catch (rbErr) {
+        console.error('Rollback error (sale may be partially written):', rbErr);
+      }
+    };
+
+    // ─── Dev-only failure injection for rollback testing ─────
+    const forceFailure = process.env.NODE_ENV !== 'production'
+      && request.headers.get('X-Force-Inventory-Failure') === 'after-update';
+    let firstUpdateDone = false;
+
+    // ─── Adjust Inventory — Products (dual-write, error-checked) ──
 
     for (const item of verifiedItems.filter(i => i.item_type === 'product')) {
       const { data: inv } = await adminClient
@@ -433,12 +477,32 @@ export async function POST(request: NextRequest) {
         const oldQty = invRecord.quantity as number;
         const newQty = oldQty - item.quantity;
 
-        await adminClient.from('inventory')
+        const { error: updateErr } = await adminClient.from('inventory')
           .update({ quantity: newQty } as Record<string, unknown>)
           .eq('id', invRecord.id as string);
 
+        if (updateErr) {
+          await rollbackFromLedger();
+          return NextResponse.json({
+            error: `Inventory update failed for "${item.name}": ${updateErr.message}. Sale rolled back.`
+          }, { status: 500 });
+        }
+
+        // Stock mutation succeeded — record in ledger for rollback safety
+        stockMutations.push({ inventoryId: invRecord.id as string, quantityBefore: oldQty });
+
+        // Dev-only: simulate failure after first successful update
+        if (forceFailure && !firstUpdateDone) {
+          firstUpdateDone = true;
+          console.warn('[DEV] Forced inventory failure — triggering rollback');
+          await rollbackFromLedger();
+          return NextResponse.json({
+            error: '[DEV] Forced inventory failure after update. Rollback executed.'
+          }, { status: 500 });
+        }
+
         // Legacy stock_adjustments (backward compat)
-        await adminClient.from('stock_adjustments').insert({
+        const { error: adjErr } = await adminClient.from('stock_adjustments').insert({
           inventory_id: invRecord.id as string,
           branch_id,
           user_id: currentUser.id,
@@ -448,8 +512,15 @@ export async function POST(request: NextRequest) {
           reference_id: saleId,
         } as Record<string, unknown>);
 
+        if (adjErr) {
+          await rollbackFromLedger();
+          return NextResponse.json({
+            error: `Stock adjustment write failed for "${item.name}": ${adjErr.message}. Sale rolled back.`
+          }, { status: 500 });
+        }
+
         // New canonical inventory_logs
-        await adminClient.from('inventory_logs').insert({
+        const { error: logErr } = await adminClient.from('inventory_logs').insert({
           inventory_id: invRecord.id as string,
           product_id: item.id,
           branch_id,
@@ -460,35 +531,17 @@ export async function POST(request: NextRequest) {
           quantity_after: newQty,
           sale_id: saleId,
         } as Record<string, unknown>);
+
+        if (logErr) {
+          await rollbackFromLedger();
+          return NextResponse.json({
+            error: `Inventory log write failed for "${item.name}": ${logErr.message}. Sale rolled back.`
+          }, { status: 500 });
+        }
       }
     }
 
-    // ─── Rollback helper (compensating cleanup if post-write step fails) ──
-    const rollbackSale = async () => {
-      try {
-        // Reverse any product inventory changes already made for this sale
-        const { data: invLogs } = await adminClient
-          .from('inventory_logs')
-          .select('inventory_id, quantity_delta, quantity_before')
-          .eq('sale_id', saleId);
-
-        for (const log of (invLogs || []) as Record<string, unknown>[]) {
-          await adminClient.from('inventory')
-            .update({ quantity: log.quantity_before } as Record<string, unknown>)
-            .eq('id', log.inventory_id as string);
-        }
-
-        await adminClient.from('inventory_logs').delete().eq('sale_id', saleId);
-        await adminClient.from('stock_adjustments').delete().eq('reference_id', saleId);
-        await adminClient.from('payments').delete().eq('sale_id', saleId);
-        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
-        await adminClient.from('sales').delete().eq('id', saleId);
-      } catch (rbErr) {
-        console.error('Rollback error (sale may be partially written):', rbErr);
-      }
-    };
-
-    // ─── Service BOM deduction ───────────────────────────────
+    // ─── Service BOM deduction (error-checked, ledger-tracked) ──
 
     if (ENABLE_SERVICE_BOM) {
       for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
@@ -515,17 +568,26 @@ export async function POST(request: NextRequest) {
               const newQty = oldQty - bomQty;
 
               if (newQty < 0) {
-                await rollbackSale();
+                await rollbackFromLedger();
                 return NextResponse.json({
                   error: `Concurrent stock conflict for consumable of "${svcItem.name}". Sale rolled back — please retry.`
                 }, { status: 409 });
               }
 
-              await adminClient.from('inventory')
+              const { error: bomUpdateErr } = await adminClient.from('inventory')
                 .update({ quantity: newQty } as Record<string, unknown>)
                 .eq('id', bomInvData.id as string);
 
-              await adminClient.from('inventory_logs').insert({
+              if (bomUpdateErr) {
+                await rollbackFromLedger();
+                return NextResponse.json({
+                  error: `BOM inventory update failed for "${svcItem.name}": ${bomUpdateErr.message}. Sale rolled back.`
+                }, { status: 500 });
+              }
+
+              stockMutations.push({ inventoryId: bomInvData.id as string, quantityBefore: oldQty });
+
+              const { error: bomLogErr } = await adminClient.from('inventory_logs').insert({
                 inventory_id: bomInvData.id as string,
                 product_id: bomProductId,
                 branch_id,
@@ -537,6 +599,13 @@ export async function POST(request: NextRequest) {
                 sale_id: saleId,
                 notes: `BOM for "${svcItem.name}" — Sale ${receiptNumber}`,
               } as Record<string, unknown>);
+
+              if (bomLogErr) {
+                await rollbackFromLedger();
+                return NextResponse.json({
+                  error: `BOM log write failed for "${svcItem.name}": ${bomLogErr.message}. Sale rolled back.`
+                }, { status: 500 });
+              }
             }
           }
         }
@@ -562,8 +631,8 @@ export async function POST(request: NextRequest) {
 
       for (let idx = 0; idx < packageEligibleItems.length; idx++) {
         const svcItem = packageEligibleItems[idx];
-        // Phase 5: use POS-provided total_sessions override, else service default
-        const sessionCount = total_sessions || svcItem.default_session_count || 1;
+        // Per-item session override → service default → 1
+        const sessionCount = svcItem.session_override || svcItem.default_session_count || 1;
         const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
         const itemTotal = svcItem.unit_price * svcItem.quantity;
         const isLast = idx === packageEligibleItems.length - 1;

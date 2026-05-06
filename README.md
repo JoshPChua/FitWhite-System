@@ -343,8 +343,12 @@ Before deploying to production, verify each flow manually:
 
 ### User Management
 - [ ] Create staff in Imus-only mode — branch auto-assigned, no branch selector visible
-- [ ] Mark staff as doctor — set commission rate, verify shows in POS doctor dropdown
 - [ ] Manager cannot create users in another branch
+
+### Doctor Management
+- [ ] Create doctor via Clinic → Doctors — appears in POS doctor dropdown
+- [ ] Edit doctor commission type/rate — reflected in new sales
+- [ ] Deactivate doctor — no longer selectable in POS
 
 ### Customer Management
 - [ ] Create patient in Imus-only mode — branch auto-assigned server-side

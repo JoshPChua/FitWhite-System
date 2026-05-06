@@ -8,9 +8,9 @@ import { ENABLE_DOCTOR_COMMISSIONS, ENABLE_SERVICE_BOM, IMUS_ONLY, IMUS_BRANCH_C
 
 // ─── Types ───────────────────────────────────────────────────
 
-type ItemType = 'service' | 'product' | 'bundle';
+type ItemType = 'service' | 'product';
 type PaymentMethod = 'cash' | 'gcash' | 'card' | 'bank_transfer';
-type POSTab = 'services' | 'products' | 'bundles';
+type POSTab = 'services' | 'products';
 
 interface CatalogItem {
   id: string;
@@ -33,6 +33,7 @@ interface CartLine {
   quantity: number;
   total_price: number;
   stock?: number | null;   // track for product cap
+  session_override?: number; // per-line session count override (services only)
 }
 
 interface Customer {
@@ -121,7 +122,7 @@ export default function POSPage() {
   const [paymentType, setPaymentType] = useState<'full' | 'installment'>('full');
   const [commissionMode, setCommissionMode] = useState<'default' | 'percent' | 'fixed'>('default');
   const [commissionValue, setCommissionValue] = useState<string>('');
-  const [sessionCountOverride, setSessionCountOverride] = useState<string>('');
+  // Session count override is now per-cart-line (CartLine.session_override)
 
   // Extra consumables modal
   const [showExtraConsumable, setShowExtraConsumable] = useState(false);
@@ -176,21 +177,6 @@ export default function POSPage() {
           description: p.description as string | null,
           is_active: p.is_active as boolean,
           stock: ((p.inventory as Record<string, unknown>[])?.[0]?.quantity ?? 0) as number,
-        })));
-      } else {
-        const { data } = await supabase
-          .from('bundles')
-          .select('id, name, price, description, is_active, bundle_items(id, quantity, services:service_id(name), products:product_id(name))')
-          .eq('branch_id', posBranch.id)
-          .eq('is_active', true)
-          .order('name');
-        setCatalog((data || []).map((b: Record<string, unknown>) => ({
-          id: b.id as string,
-          item_type: 'bundle' as ItemType,
-          name: b.name as string,
-          price: Number(b.price),
-          description: b.description as string | null,
-          is_active: b.is_active as boolean,
         })));
       }
     } finally {
@@ -371,6 +357,7 @@ export default function POSPage() {
         name: l.name,
         quantity: l.quantity,
         unit_price: l.unit_price,
+        ...(l.item_type === 'service' && l.session_override ? { session_override: l.session_override } : {}),
       }));
 
       const res = await fetch('/api/sales/checkout', {
@@ -388,7 +375,6 @@ export default function POSPage() {
           payment_type: paymentType,
           commission_mode: commissionMode,
           commission_value: commissionMode !== 'default' && commissionValue ? Number(commissionValue) : null,
-          total_sessions: sessionCountOverride ? Number(sessionCountOverride) : null,
         }),
       });
 
@@ -426,7 +412,6 @@ export default function POSPage() {
       setPaymentType('full');
       setCommissionMode('default');
       setCommissionValue('');
-      setSessionCountOverride('');
     } catch {
       setPaymentError('Network error — please try again');
     } finally {
@@ -452,7 +437,7 @@ export default function POSPage() {
     .map(i => i.category)
     .filter(Boolean))] as string[];
 
-  const TAB_LABELS: Record<POSTab, string> = { services: 'Services', products: 'Products', bundles: 'Bundles' };
+  const TAB_LABELS: Record<POSTab, string> = { services: 'Services', products: 'Products' };
 
   // ─── Render ──────────────────────────────────────────────
 
@@ -466,7 +451,7 @@ export default function POSPage() {
         <div className="flex items-center justify-between gap-3 flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className="flex rounded-xl border border-brand-200 bg-white overflow-hidden shadow-sm">
-              {(['services', 'products', 'bundles'] as POSTab[]).map(tab => (
+              {(['services', 'products'] as POSTab[]).map(tab => (
                 <button key={tab} onClick={() => setActiveTab(tab)}
                   className={`px-4 py-2 text-sm font-medium transition-colors ${
                     activeTab === tab
@@ -560,8 +545,7 @@ export default function POSPage() {
                     {/* Item type tag */}
                     <span className={`absolute top-3 right-3 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full ${
                       item.item_type === 'service' ? 'bg-brand-100 text-brand-600' :
-                      item.item_type === 'product' ? 'bg-amber-100 text-amber-700' :
-                      'bg-violet-100 text-violet-700'
+                      'bg-amber-100 text-amber-700'
                     }`}>
                       {item.item_type}
                     </span>
@@ -738,16 +722,7 @@ export default function POSPage() {
               </div>
             )}
 
-            {/* Session Count Override */}
-            {cart.some(l => l.item_type === 'service') && (
-              <div>
-                <label className="block text-[10px] font-semibold text-brand-400 uppercase tracking-wide mb-1">Total Sessions</label>
-                <input type="number" min="1" value={sessionCountOverride}
-                  onChange={e => setSessionCountOverride(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl border border-brand-200 text-sm focus:outline-none focus:ring-2 focus:ring-brand-400/50"
-                  placeholder="Leave blank for service default" />
-              </div>
-            )}
+            {/* Session count override is now per-line in the cart */}
 
             {/* Payment Type */}
             {cart.some(l => l.item_type === 'service') && customer && (
@@ -784,30 +759,50 @@ export default function POSPage() {
           ) : (
             <div className="flex-1 overflow-y-auto divide-y divide-brand-100/40">
               {cart.map(line => (
-                <div key={line.key} className="px-4 py-3 flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-brand-800 truncate">{line.name}</p>
-                    <p className="text-xs text-brand-400">{formatCurrency(line.unit_price)} ea.</p>
-                  </div>
-                  <div className="flex items-center gap-1.5 flex-shrink-0">
-                    <button onClick={() => updateQty(line.key, -1)}
-                      className="w-6 h-6 rounded-full border border-brand-200 text-brand-500 hover:bg-brand-50 flex items-center justify-center text-sm font-bold transition-colors">
-                      −
+                <div key={line.key} className="px-4 py-3 flex flex-col gap-1.5">
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-brand-800 truncate">{line.name}</p>
+                      <p className="text-xs text-brand-400">{formatCurrency(line.unit_price)} ea.</p>
+                    </div>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <button onClick={() => updateQty(line.key, -1)}
+                        className="w-6 h-6 rounded-full border border-brand-200 text-brand-500 hover:bg-brand-50 flex items-center justify-center text-sm font-bold transition-colors">
+                        −
+                      </button>
+                      <span className="w-6 text-center text-sm font-semibold text-brand-800">{line.quantity}</span>
+                      <button onClick={() => updateQty(line.key, 1)}
+                        disabled={line.item_type === 'product' && line.stock !== null && line.stock !== undefined && line.quantity >= line.stock}
+                        className="w-6 h-6 rounded-full border border-brand-200 text-brand-500 hover:bg-brand-50 flex items-center justify-center text-sm font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        +
+                      </button>
+                    </div>
+                    <span className="w-20 text-right text-sm font-semibold text-brand-700 flex-shrink-0">{formatCurrency(line.total_price)}</span>
+                    <button onClick={() => removeFromCart(line.key)}
+                      className="text-rose-300 hover:text-rose-600 transition-colors flex-shrink-0">
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
                     </button>
-                    <span className="w-6 text-center text-sm font-semibold text-brand-800">{line.quantity}</span>
-                    <button onClick={() => updateQty(line.key, 1)}
-                      disabled={line.item_type === 'product' && line.stock !== null && line.stock !== undefined && line.quantity >= line.stock}
-                      className="w-6 h-6 rounded-full border border-brand-200 text-brand-500 hover:bg-brand-50 flex items-center justify-center text-sm font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
-                      +
-                    </button>
                   </div>
-                  <span className="w-20 text-right text-sm font-semibold text-brand-700 flex-shrink-0">{formatCurrency(line.total_price)}</span>
-                  <button onClick={() => removeFromCart(line.key)}
-                    className="text-rose-300 hover:text-rose-600 transition-colors flex-shrink-0">
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+                  {/* Per-line session override (services only) */}
+                  {line.item_type === 'service' && (
+                    <div className="flex items-center gap-2 pl-0.5">
+                      <label className="text-[10px] font-medium text-brand-400 whitespace-nowrap">Sessions</label>
+                      <input
+                        type="number" min="1" step="1"
+                        value={line.session_override ?? ''}
+                        onChange={e => {
+                          const raw = parseFloat(e.target.value);
+                          const val = e.target.value === '' ? undefined : Math.floor(Math.max(1, raw || 1));
+                          setCart(prev => prev.map(l => l.key === line.key ? { ...l, session_override: val } : l));
+                        }}
+                        placeholder="default"
+                        className="w-20 px-2 py-1 rounded-lg border border-brand-200 text-xs text-brand-800 text-center
+                                   placeholder:text-brand-300 focus:outline-none focus:ring-1 focus:ring-brand-400"
+                      />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
