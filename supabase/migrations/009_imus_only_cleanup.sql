@@ -17,13 +17,17 @@
 
 DO $$
 DECLARE
-  v_imus_id UUID := 'b0000001-0000-0000-0000-000000000001';
+  v_imus_id UUID;
   v_count   INT;
 BEGIN
-  -- Safety check: Imus branch must exist
-  IF NOT EXISTS (SELECT 1 FROM branches WHERE id = v_imus_id) THEN
-    RAISE EXCEPTION 'Imus branch not found. Aborting cleanup.';
+  -- Look up Imus branch by code (works regardless of UUID format)
+  SELECT id INTO v_imus_id FROM branches WHERE code = 'IMS' LIMIT 1;
+
+  IF v_imus_id IS NULL THEN
+    RAISE EXCEPTION 'Imus branch (code=IMS) not found. Aborting cleanup.';
   END IF;
+
+  RAISE NOTICE 'Found Imus branch: %', v_imus_id;
 
   -- ── 1. Clean tables with ON DELETE RESTRICT references to branches ──
   --    These would block branch deletion if not cleaned first.
