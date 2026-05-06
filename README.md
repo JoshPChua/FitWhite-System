@@ -50,7 +50,7 @@
 ## Features
 
 ### Point of Sale (POS)
-- Multi-item cart (services, products, bundles)
+- Multi-item cart (services, products)
 - Real-time catalog with category filters and search
 - Split payments (Cash, GCash, Card, Bank Transfer)
 - Live stock enforcement (client + server-side)
@@ -97,7 +97,7 @@
 ### User & Role Management
 - **Owner** — full system access across all branches
 - **Manager** — full access within their branch only
-- **Cashier** — POS access only
+- **Cashier** — POS and operational access (same as manager within their branch)
 
 ### Doctor Management
 - Standalone `doctors` table (no Supabase Auth account required)
@@ -228,6 +228,7 @@ cp .env.example .env.local
 #    supabase/migrations/005_add_void_reversal_source.sql
 #    supabase/migrations/006_doctors_table.sql
 #    supabase/migrations/007_production_hardening.sql
+#    supabase/migrations/008_doctor_branch_guard.sql
 
 # 4. Create the seed auth users
 npx ts-node scripts/seed-auth-users.ts
@@ -282,6 +283,7 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `005_add_void_reversal_source.sql` | `void_reversal` enum value for inventory logs |
 | `006_doctors_table.sql` | Standalone doctors table, FK migration from profiles, RLS |
 | `007_production_hardening.sql` | Atomic checkout RPC, receipt counters, branch authorization |
+| `008_doctor_branch_guard.sql` | Doctor branch-match enforcement in commission trigger |
 
 ### Table Summary
 

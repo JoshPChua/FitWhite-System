@@ -15,9 +15,8 @@ import type { Profile } from '@/types/database';
  *
  * Ordering invariant:
  *   All reversals run BEFORE the sale status is set to 'voided'.
- *   If any reversal step fails, the sale stays 'completed' and the caller
- *   gets an error describing what failed. This prevents partial-void states
- *   where the sale is voided but side-effect data is inconsistent.
+ *   If any reversal step fails, the sale stays 'completed' and all
+ *   previously-applied mutations are rolled back using an in-memory ledger.
  */
 export async function POST(
   request: NextRequest,
@@ -86,6 +85,47 @@ export async function POST(
     const allSaleItems = (saleItems || []) as Record<string, unknown>[];
     const saleItemIds = allSaleItems.map(si => si.id as string);
 
+    // ─── Rollback ledger: tracks every void-side mutation ────
+    //     If any step fails, we reverse all previous mutations.
+
+    interface VoidMutation {
+      inventoryId: string;
+      quantityBefore: number;
+    }
+    const voidMutations: VoidMutation[] = [];
+    const voidLogIds: string[] = []; // inventory_logs created during void
+
+    // Package state snapshots for rollback
+    let savedPackagePayments: Record<string, unknown>[] = [];
+    const cancelledPackages: Array<{ id: string; previousStatus: string }> = [];
+
+    const rollbackVoid = async () => {
+      try {
+        // 1. Reverse inventory mutations in reverse order
+        for (const m of [...voidMutations].reverse()) {
+          await adminClient.from('inventory')
+            .update({ quantity: m.quantityBefore } as Record<string, unknown>)
+            .eq('id', m.inventoryId);
+        }
+        // 2. Delete any void-side inventory logs
+        if (voidLogIds.length > 0) {
+          await adminClient.from('inventory_logs').delete().in('id', voidLogIds);
+        }
+        // 3. Restore cancelled packages to their previous statuses
+        for (const pkg of cancelledPackages) {
+          await adminClient.from('patient_packages')
+            .update({ status: pkg.previousStatus } as Record<string, unknown>)
+            .eq('id', pkg.id);
+        }
+        // 4. Reinsert deleted package_payments from saved full rows
+        if (savedPackagePayments.length > 0) {
+          await adminClient.from('package_payments').insert(savedPackagePayments);
+        }
+      } catch (rbErr) {
+        console.error('Void rollback error (sale may have inconsistent state):', rbErr);
+      }
+    };
+
     // ─── 1. Restore product inventory ───────────────────────
     const productSaleItems = allSaleItems.filter(si => si.item_type === 'product');
 
@@ -98,6 +138,7 @@ export async function POST(
         .single();
 
       if (invErr) {
+        await rollbackVoid();
         return NextResponse.json({
           error: `Failed to read inventory for product "${item.name}": ${invErr.message}. Sale NOT voided.`
         }, { status: 500 });
@@ -105,19 +146,24 @@ export async function POST(
 
       if (inv) {
         const invRecord = inv as Record<string, unknown>;
-        const newQty = (invRecord.quantity as number) + (item.quantity as number);
+        const oldQty = invRecord.quantity as number;
+        const newQty = oldQty + (item.quantity as number);
 
         const { error: updateErr } = await adminClient.from('inventory')
           .update({ quantity: newQty } as Record<string, unknown>)
           .eq('id', invRecord.id as string);
 
         if (updateErr) {
+          await rollbackVoid();
           return NextResponse.json({
             error: `Failed to restore inventory for "${item.name}": ${updateErr.message}. Sale NOT voided.`
           }, { status: 500 });
         }
 
-        // Stock adjustment log
+        // Track mutation for rollback
+        voidMutations.push({ inventoryId: invRecord.id as string, quantityBefore: oldQty });
+
+        // Stock adjustment log (non-fatal)
         const { error: adjErr } = await adminClient.from('stock_adjustments').insert({
           inventory_id: invRecord.id as string,
           branch_id: sale.branch_id as string,
@@ -142,6 +188,7 @@ export async function POST(
       .eq('source', 'service_bom');
 
     if (bomLogsErr) {
+      await rollbackVoid();
       return NextResponse.json({
         error: `Failed to read BOM logs: ${bomLogsErr.message}. Sale NOT voided.`
       }, { status: 500 });
@@ -157,6 +204,7 @@ export async function POST(
         .single();
 
       if (readErr) {
+        await rollbackVoid();
         return NextResponse.json({
           error: `Failed to read BOM inventory: ${readErr.message}. Sale NOT voided.`
         }, { status: 500 });
@@ -171,13 +219,17 @@ export async function POST(
           .eq('id', log.inventory_id as string);
 
         if (updateErr) {
+          await rollbackVoid();
           return NextResponse.json({
             error: `Failed to restore BOM inventory: ${updateErr.message}. Sale NOT voided.`
           }, { status: 500 });
         }
 
+        // Track mutation for rollback
+        voidMutations.push({ inventoryId: log.inventory_id as string, quantityBefore: currentQty });
+
         // Log the reversal
-        const { error: logErr } = await adminClient.from('inventory_logs').insert({
+        const { data: reversalLog, error: logErr } = await adminClient.from('inventory_logs').insert({
           inventory_id: log.inventory_id as string,
           product_id: log.product_id as string,
           branch_id: sale.branch_id as string,
@@ -188,10 +240,12 @@ export async function POST(
           quantity_after: newQty,
           sale_id: saleId,
           notes: `Void reversal of BOM deduction — ${sale.receipt_number as string}`,
-        } as Record<string, unknown>);
+        } as Record<string, unknown>).select('id').single();
 
         if (logErr) {
           console.error('BOM reversal log failed (non-fatal):', logErr);
+        } else if (reversalLog) {
+          voidLogIds.push((reversalLog as Record<string, unknown>).id as string);
         }
       }
     }
@@ -200,18 +254,35 @@ export async function POST(
     if (saleItemIds.length > 0) {
       const { data: packages, error: pkgErr } = await adminClient
         .from('patient_packages')
-        .select('id')
+        .select('id, status')
         .in('sale_item_id', saleItemIds);
 
       if (pkgErr) {
+        await rollbackVoid();
         return NextResponse.json({
           error: `Failed to read packages: ${pkgErr.message}. Sale NOT voided.`
         }, { status: 500 });
       }
 
-      const packageIds = ((packages || []) as Record<string, unknown>[]).map(p => p.id as string);
+      const packageRecords = (packages || []) as Record<string, unknown>[];
+      const packageIds = packageRecords.map(p => p.id as string);
 
       if (packageIds.length > 0) {
+        // Fetch and store full package_payment rows BEFORE deletion (for rollback)
+        const { data: existingPayments, error: ppFetchErr } = await adminClient
+          .from('package_payments')
+          .select('*')
+          .in('package_id', packageIds);
+
+        if (ppFetchErr) {
+          await rollbackVoid();
+          return NextResponse.json({
+            error: `Failed to read package payments: ${ppFetchErr.message}. Sale NOT voided.`
+          }, { status: 500 });
+        }
+
+        savedPackagePayments = (existingPayments || []) as Record<string, unknown>[];
+
         // Delete package_payments first (FK constraint)
         const { error: ppDelErr } = await adminClient
           .from('package_payments')
@@ -219,21 +290,31 @@ export async function POST(
           .in('package_id', packageIds);
 
         if (ppDelErr) {
+          // package_payments not deleted yet, just reset savedPackagePayments and rollback
+          savedPackagePayments = [];
+          await rollbackVoid();
           return NextResponse.json({
             error: `Failed to delete package payments: ${ppDelErr.message}. Sale NOT voided.`
           }, { status: 500 });
         }
 
-        // Cancel the packages
-        const { error: pkgCancelErr } = await adminClient
-          .from('patient_packages')
-          .update({ status: 'cancelled' } as Record<string, unknown>)
-          .in('id', packageIds);
+        // Cancel the packages (store previous statuses for rollback)
+        for (const pkg of packageRecords) {
+          const previousStatus = pkg.status as string;
 
-        if (pkgCancelErr) {
-          return NextResponse.json({
-            error: `Failed to cancel packages: ${pkgCancelErr.message}. Sale NOT voided.`
-          }, { status: 500 });
+          const { error: pkgCancelErr } = await adminClient
+            .from('patient_packages')
+            .update({ status: 'cancelled' } as Record<string, unknown>)
+            .eq('id', pkg.id as string);
+
+          if (pkgCancelErr) {
+            await rollbackVoid();
+            return NextResponse.json({
+              error: `Failed to cancel package ${pkg.id}: ${pkgCancelErr.message}. Sale NOT voided.`
+            }, { status: 500 });
+          }
+
+          cancelledPackages.push({ id: pkg.id as string, previousStatus });
         }
       }
     }
@@ -246,6 +327,7 @@ export async function POST(
         .in('sale_item_id', saleItemIds);
 
       if (commDelErr) {
+        await rollbackVoid();
         return NextResponse.json({
           error: `Failed to delete commissions: ${commDelErr.message}. Sale NOT voided.`
         }, { status: 500 });
@@ -260,9 +342,10 @@ export async function POST(
       .eq('id', saleId);
 
     if (voidError) {
+      await rollbackVoid();
       return NextResponse.json({
         error: `All reversals succeeded but failed to mark sale as voided: ${voidError.message}. ` +
-               'The sale data is consistent but status was not updated. Contact support.'
+               'Void rolled back. Contact support.'
       }, { status: 500 });
     }
 
@@ -280,7 +363,7 @@ export async function POST(
         total: sale.total,
         products_restored: productSaleItems.length,
         bom_logs_reversed: (bomLogs || []).length,
-        packages_cancelled: saleItemIds.length,
+        packages_cancelled: cancelledPackages.length,
       },
     } as Record<string, unknown>);
 

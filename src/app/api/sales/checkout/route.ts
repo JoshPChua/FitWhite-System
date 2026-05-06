@@ -354,56 +354,76 @@ export async function POST(request: NextRequest) {
     if (attending_doctor_id) {
       const { data: doctorRecord } = await adminClient
         .from('doctors')
-        .select('id, full_name, default_commission_type, default_commission_value')
+        .select('id, full_name, branch_id, is_active, default_commission_type, default_commission_value')
         .eq('id', attending_doctor_id)
         .single();
 
-      if (doctorRecord) {
-        const doc = doctorRecord as Record<string, unknown>;
-        const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
+      if (!doctorRecord) {
+        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
+        await adminClient.from('sales').delete().eq('id', saleId);
+        return NextResponse.json({ error: 'Attending doctor not found' }, { status: 400 });
+      }
 
-        for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
-          const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
-          const grossAmount = svcItem.unit_price * svcItem.quantity;
+      const doc = doctorRecord as Record<string, unknown>;
 
-          // Determine commission: POS override takes priority, then doctor default
-          let commAmount = 0;
-          let commRate: number | null = null;
+      // Doctor must be active
+      if (!(doc.is_active as boolean)) {
+        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
+        await adminClient.from('sales').delete().eq('id', saleId);
+        return NextResponse.json({ error: 'Attending doctor is inactive' }, { status: 400 });
+      }
 
-          if (commission_mode === 'fixed' && commission_value != null) {
-            commAmount = commission_value;
-          } else if (commission_mode === 'percent' && commission_value != null) {
-            commRate = commission_value > 1 ? commission_value / 100 : commission_value;
-            commAmount = grossAmount * commRate;
+      // Doctor must belong to the sale branch
+      if (doc.branch_id !== branch_id) {
+        await adminClient.from('sale_items').delete().eq('sale_id', saleId);
+        await adminClient.from('sales').delete().eq('id', saleId);
+        return NextResponse.json({ error: 'Attending doctor does not belong to this branch' }, { status: 400 });
+      }
+
+      const saleItemsData = (insertedSaleItems || []) as Record<string, unknown>[];
+
+      for (const svcItem of verifiedItems.filter(i => i.item_type === 'service')) {
+        const matchingSaleItem = saleItemsData.find(si => si.service_id === svcItem.id);
+        const grossAmount = svcItem.unit_price * svcItem.quantity;
+
+        // Determine commission: POS override takes priority, then doctor default
+        let commAmount = 0;
+        let commRate: number | null = null;
+
+        if (commission_mode === 'fixed' && commission_value != null) {
+          commAmount = commission_value;
+        } else if (commission_mode === 'percent' && commission_value != null) {
+          commRate = commission_value > 1 ? commission_value / 100 : commission_value;
+          commAmount = grossAmount * commRate;
+        } else {
+          const defType = doc.default_commission_type as string;
+          const defVal = Number(doc.default_commission_value) || 0;
+          if (defType === 'fixed') {
+            commAmount = defVal;
           } else {
-            const defType = doc.default_commission_type as string;
-            const defVal = Number(doc.default_commission_value) || 0;
-            if (defType === 'fixed') {
-              commAmount = defVal;
-            } else {
-              commRate = defVal;
-              commAmount = grossAmount * defVal;
-            }
+            commRate = defVal;
+            commAmount = grossAmount * defVal;
           }
+        }
 
-          if (commAmount > 0) {
-            const { error: commError } = await adminClient.from('doctor_commissions').insert({
-              branch_id,
-              doctor_id: attending_doctor_id,
-              sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
-              gross_amount: grossAmount,
-              commission_rate: commRate,
-              commission_amount: Math.round(commAmount * 100) / 100,
-            } as Record<string, unknown>);
+        if (commAmount > 0) {
+          const { error: commError } = await adminClient.from('doctor_commissions').insert({
+            branch_id,
+            doctor_id: attending_doctor_id,
+            sale_item_id: matchingSaleItem ? matchingSaleItem.id as string : null,
+            gross_amount: grossAmount,
+            commission_rate: commRate,
+            commission_amount: Math.round(commAmount * 100) / 100,
+          } as Record<string, unknown>);
 
-            if (commError) {
-              // HARD FAIL: commission is required. Roll back the sale.
-              console.error('Commission insert failed, rolling back sale:', commError.message);
-              await adminClient.from('sales').delete().eq('id', saleId);
-              return NextResponse.json({
-                error: `Commission creation failed: ${commError.message}. Sale was not completed.`
-              }, { status: 500 });
-            }
+          if (commError) {
+            // HARD FAIL: commission is required. Roll back the sale.
+            console.error('Commission insert failed, rolling back sale:', commError.message);
+            await adminClient.from('sale_items').delete().eq('sale_id', saleId);
+            await adminClient.from('sales').delete().eq('id', saleId);
+            return NextResponse.json({
+              error: `Commission creation failed: ${commError.message}. Sale was not completed.`
+            }, { status: 500 });
           }
         }
       }
@@ -437,6 +457,9 @@ export async function POST(request: NextRequest) {
     }
     const stockMutations: StockMutation[] = [];
 
+    // Track created package IDs for cleanup during rollback
+    const createdPackageIds: string[] = [];
+
     const rollbackFromLedger = async () => {
       try {
         // Reverse stock mutations in reverse order using snapshot values
@@ -445,10 +468,21 @@ export async function POST(request: NextRequest) {
             .update({ quantity: m.quantityBefore } as Record<string, unknown>)
             .eq('id', m.inventoryId);
         }
+        // Clean up created packages (payments first due to FK)
+        if (createdPackageIds.length > 0) {
+          await adminClient.from('package_payments').delete().in('package_id', createdPackageIds);
+          await adminClient.from('patient_packages').delete().in('id', createdPackageIds);
+        }
         // Clean up any partial writes for this sale
         await adminClient.from('inventory_logs').delete().eq('sale_id', saleId);
         await adminClient.from('stock_adjustments').delete().eq('reference_id', saleId);
-        await adminClient.from('doctor_commissions').delete().eq('branch_id', branch_id);
+        // Scope commission cleanup to THIS sale's items only
+        const { data: currentSaleItems } = await adminClient
+          .from('sale_items').select('id').eq('sale_id', saleId);
+        const rollbackSaleItemIds = ((currentSaleItems || []) as Record<string, unknown>[]).map(si => si.id as string);
+        if (rollbackSaleItemIds.length > 0) {
+          await adminClient.from('doctor_commissions').delete().in('sale_item_id', rollbackSaleItemIds);
+        }
         await adminClient.from('payments').delete().eq('sale_id', saleId);
         await adminClient.from('sale_items').delete().eq('sale_id', saleId);
         await adminClient.from('sales').delete().eq('id', saleId);
@@ -653,7 +687,7 @@ export async function POST(request: NextRequest) {
         }
         allocatedSoFar += allocated;
 
-        const { data: pkg } = await adminClient
+        const { data: pkg, error: pkgError } = await adminClient
           .from('patient_packages')
           .insert({
             branch_id,
@@ -671,23 +705,39 @@ export async function POST(request: NextRequest) {
           .select('id')
           .single();
 
-        if (pkg) {
-          createdPackages.push({
-            id: (pkg as Record<string, unknown>).id as string,
-            service_name: svcItem.name,
-            total_sessions: sessionCount * svcItem.quantity,
-          });
+        if (pkgError || !pkg) {
+          console.error('Package creation failed, rolling back sale:', pkgError?.message);
+          await rollbackFromLedger();
+          return NextResponse.json({
+            error: `Package creation failed for "${svcItem.name}": ${pkgError?.message || 'unknown error'}. Sale rolled back.`
+          }, { status: 500 });
+        }
 
-          // Record downpayment in package_payments ledger
-          if (allocated > 0) {
-            await adminClient.from('package_payments').insert({
-              package_id: (pkg as Record<string, unknown>).id as string,
-              branch_id,
-              received_by: currentUser.id,
-              amount: allocated,
-              method: payments[0]?.method || 'cash',
-              notes: `Downpayment from sale ${receiptNumber}`,
-            } as Record<string, unknown>);
+        const pkgId = (pkg as Record<string, unknown>).id as string;
+        createdPackageIds.push(pkgId);
+        createdPackages.push({
+          id: pkgId,
+          service_name: svcItem.name,
+          total_sessions: sessionCount * svcItem.quantity,
+        });
+
+        // Record downpayment in package_payments ledger (REQUIRED)
+        if (allocated > 0) {
+          const { error: ppError } = await adminClient.from('package_payments').insert({
+            package_id: pkgId,
+            branch_id,
+            received_by: currentUser.id,
+            amount: allocated,
+            method: payments[0]?.method || 'cash',
+            notes: `Downpayment from sale ${receiptNumber}`,
+          } as Record<string, unknown>);
+
+          if (ppError) {
+            console.error('Package payment insert failed, rolling back sale:', ppError.message);
+            await rollbackFromLedger();
+            return NextResponse.json({
+              error: `Package payment failed for "${svcItem.name}": ${ppError.message}. Sale rolled back.`
+            }, { status: 500 });
           }
         }
       }

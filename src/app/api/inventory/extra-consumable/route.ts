@@ -36,8 +36,8 @@ export async function POST(request: NextRequest) {
     if (!product_id || !branch_id) {
       return NextResponse.json({ error: 'product_id and branch_id are required' }, { status: 400 });
     }
-    if (quantity < 1) {
-      return NextResponse.json({ error: 'Quantity must be at least 1' }, { status: 400 });
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      return NextResponse.json({ error: 'Quantity must be a whole number ≥ 1' }, { status: 400 });
     }
 
     // Branch isolation for non-owners
@@ -74,13 +74,19 @@ export async function POST(request: NextRequest) {
 
     const newQty = oldQty - quantity;
 
-    // Update inventory
-    await adminClient.from('inventory')
+    // Update inventory (error-checked)
+    const { error: updateErr } = await adminClient.from('inventory')
       .update({ quantity: newQty } as Record<string, unknown>)
       .eq('id', invRecord.id as string);
 
-    // Write inventory log with addon_manual source
-    await adminClient.from('inventory_logs').insert({
+    if (updateErr) {
+      return NextResponse.json({
+        error: `Inventory update failed for "${productName}": ${updateErr.message}`
+      }, { status: 500 });
+    }
+
+    // Write inventory log with addon_manual source (error-checked with rollback)
+    const { error: logErr } = await adminClient.from('inventory_logs').insert({
       inventory_id: invRecord.id as string,
       product_id,
       branch_id,
@@ -92,6 +98,16 @@ export async function POST(request: NextRequest) {
       sale_id: sale_id || null,
       notes: notes || `Extra consumable: "${productName}" ×${quantity}`,
     } as Record<string, unknown>);
+
+    if (logErr) {
+      // Restore inventory to previous quantity since log failed
+      await adminClient.from('inventory')
+        .update({ quantity: oldQty } as Record<string, unknown>)
+        .eq('id', invRecord.id as string);
+      return NextResponse.json({
+        error: `Inventory log failed for "${productName}": ${logErr.message}. Stock restored.`
+      }, { status: 500 });
+    }
 
     // Audit log
     await adminClient.from('audit_logs').insert({
