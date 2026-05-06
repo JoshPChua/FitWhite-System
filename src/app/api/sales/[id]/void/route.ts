@@ -94,6 +94,14 @@ export async function POST(
     }
     const voidMutations: VoidMutation[] = [];
     const voidLogIds: string[] = []; // inventory_logs created during void
+    const voidStockAdjustmentIds: string[] = []; // stock_adjustments created during void
+
+    // Strip generated/computed columns that Postgres rejects on INSERT
+    const sanitizeCommissionForInsert = (row: Record<string, unknown>): Record<string, unknown> => {
+      const { net_branch_amount, ...safe } = row;
+      void net_branch_amount; // acknowledge unused
+      return safe;
+    };
 
     // Package state snapshots for rollback
     let savedPackagePayments: Record<string, unknown>[] = [];
@@ -112,7 +120,11 @@ export async function POST(
         if (voidLogIds.length > 0) {
           await adminClient.from('inventory_logs').delete().in('id', voidLogIds);
         }
-        // 3. Restore cancelled packages to their previous statuses and paid amounts
+        // 3. Delete any void-side stock adjustments
+        if (voidStockAdjustmentIds.length > 0) {
+          await adminClient.from('stock_adjustments').delete().in('id', voidStockAdjustmentIds);
+        }
+        // 4. Restore cancelled packages to their previous statuses and paid amounts
         for (const pkg of cancelledPackages) {
           await adminClient.from('patient_packages')
             .update({
@@ -122,13 +134,14 @@ export async function POST(
             } as Record<string, unknown>)
             .eq('id', pkg.id);
         }
-        // 4. Reinsert deleted package_payments from saved full rows
+        // 5. Reinsert deleted package_payments from saved full rows
         if (savedPackagePayments.length > 0) {
           await adminClient.from('package_payments').insert(savedPackagePayments);
         }
-        // 5. Reinsert deleted doctor commissions from saved full rows
+        // 6. Reinsert deleted doctor commissions (sanitized — no generated columns)
         if (savedCommissions.length > 0) {
-          await adminClient.from('doctor_commissions').insert(savedCommissions);
+          const safeCommissions = savedCommissions.map(sanitizeCommissionForInsert);
+          await adminClient.from('doctor_commissions').insert(safeCommissions);
         }
       } catch (rbErr) {
         console.error('Void rollback error (sale may have inconsistent state):', rbErr);
@@ -172,8 +185,8 @@ export async function POST(
         // Track mutation for rollback
         voidMutations.push({ inventoryId: invRecord.id as string, quantityBefore: oldQty });
 
-        // Stock adjustment log (non-fatal)
-        const { error: adjErr } = await adminClient.from('stock_adjustments').insert({
+        // Stock adjustment log (tracked for rollback if it succeeds)
+        const { data: adjData, error: adjErr } = await adminClient.from('stock_adjustments').insert({
           inventory_id: invRecord.id as string,
           branch_id: sale.branch_id as string,
           user_id: currentUser.id,
@@ -181,10 +194,12 @@ export async function POST(
           quantity_change: item.quantity as number,
           reason: `Void of ${sale.receipt_number as string}`,
           reference_id: saleId,
-        } as Record<string, unknown>);
+        } as Record<string, unknown>).select('id').single();
 
         if (adjErr) {
           console.error('Stock adjustment log failed (non-fatal):', adjErr);
+        } else if (adjData) {
+          voidStockAdjustmentIds.push((adjData as Record<string, unknown>).id as string);
         }
       }
     }
@@ -243,7 +258,7 @@ export async function POST(
           product_id: log.product_id as string,
           branch_id: sale.branch_id as string,
           performed_by: currentUser.id,
-          source: 'manual_adjust', // safe fallback; change to 'void_reversal' after migration
+          source: 'void_reversal',
           quantity_delta: restoreQty,
           quantity_before: currentQty,
           quantity_after: newQty,
