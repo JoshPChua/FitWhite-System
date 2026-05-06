@@ -23,14 +23,16 @@ export async function GET(request: NextRequest) {
 
     const adminClient = createAdminClient();
 
-    // In IMUS_ONLY mode, force Imus branch even for owners
-    let effectiveBranchId = request.nextUrl.searchParams.get('branch_id')
-      || (caller.role === 'owner' ? null : caller.branch_id);
-
-    if (IMUS_ONLY && !effectiveBranchId) {
+    // In IMUS_ONLY mode, always force Imus branch (ignore query param)
+    let effectiveBranchId: string | null;
+    if (IMUS_ONLY) {
       const { data: imusBranch } = await adminClient
         .from('branches').select('id').eq('code', IMUS_BRANCH_CODE).single();
-      if (imusBranch) effectiveBranchId = (imusBranch as Record<string, unknown>).id as string;
+      if (!imusBranch) return NextResponse.json({ error: 'Imus branch not found' }, { status: 500 });
+      effectiveBranchId = (imusBranch as Record<string, unknown>).id as string;
+    } else {
+      effectiveBranchId = request.nextUrl.searchParams.get('branch_id')
+        || (caller.role === 'owner' ? null : caller.branch_id);
     }
 
     let query = adminClient

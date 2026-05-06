@@ -229,7 +229,6 @@ cp .env.example .env.local
 #    supabase/migrations/006_doctors_table.sql
 #    supabase/migrations/007_production_hardening.sql
 #    supabase/migrations/008_doctor_branch_guard.sql
-#    supabase/migrations/009_imus_only_cleanup.sql   # Removes all non-Imus data
 
 # 4. Create the seed auth users
 npx ts-node scripts/seed-auth-users.ts
@@ -238,9 +237,14 @@ npx ts-node scripts/seed-auth-users.ts
 #    Run supabase/seed-imus.sql in the Supabase SQL Editor
 #    ⚠️ Do NOT run seed-multibranch.sql in Imus-only production
 
-# 6. Verify: SELECT code FROM branches; → should return only 'IMS'
+# 6. (Existing multi-branch DB only) Clean up non-Imus data:
+#    Run supabase/migrations/009_imus_only_cleanup.sql
+#    ⚠️ Skip this step on a fresh database — there's no non-Imus data to clean.
+#    009 requires IMS branch to exist (created by seed-imus.sql in step 5).
 
-# 7. Start the dev server
+# 7. Verify: SELECT code FROM branches; → should return only 'IMS'
+
+# 8. Start the dev server
 npm run dev
 ```
 

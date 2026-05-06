@@ -20,7 +20,8 @@ DECLARE
   branch_rec RECORD;
   svc_count  INT;
 BEGIN
-  FOR branch_rec IN SELECT id FROM branches LOOP
+  -- Imus-only: only seed the IMS branch
+  FOR branch_rec IN SELECT id FROM branches WHERE code = 'IMS' LOOP
 
     -- Skip this branch if services are already seeded
     SELECT COUNT(*) INTO svc_count FROM services WHERE branch_id = branch_rec.id;
@@ -322,7 +323,8 @@ DECLARE
   prod_id    UUID;
   prod_count INT;
 BEGIN
-  FOR branch_rec IN SELECT id FROM branches LOOP
+  -- Imus-only: only seed the IMS branch
+  FOR branch_rec IN SELECT id FROM branches WHERE code = 'IMS' LOOP
 
     -- Skip this branch if products are already seeded
     SELECT COUNT(*) INTO prod_count FROM products WHERE branch_id = branch_rec.id;
