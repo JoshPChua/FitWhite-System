@@ -21,16 +21,24 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    const branchId = request.nextUrl.searchParams.get('branch_id')
+    const adminClient = createAdminClient();
+
+    // In IMUS_ONLY mode, force Imus branch even for owners
+    let effectiveBranchId = request.nextUrl.searchParams.get('branch_id')
       || (caller.role === 'owner' ? null : caller.branch_id);
 
-    const adminClient = createAdminClient();
+    if (IMUS_ONLY && !effectiveBranchId) {
+      const { data: imusBranch } = await adminClient
+        .from('branches').select('id').eq('code', IMUS_BRANCH_CODE).single();
+      if (imusBranch) effectiveBranchId = (imusBranch as Record<string, unknown>).id as string;
+    }
+
     let query = adminClient
       .from('doctors')
       .select('*')
       .order('full_name');
 
-    if (branchId) query = query.eq('branch_id', branchId);
+    if (effectiveBranchId) query = query.eq('branch_id', effectiveBranchId);
 
     const activeOnly = request.nextUrl.searchParams.get('active');
     if (activeOnly === 'true') query = query.eq('is_active', true);

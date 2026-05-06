@@ -38,11 +38,15 @@ export async function GET(request: NextRequest) {
       `)
       .order('created_at', { ascending: false });
 
-    // Branch isolation for non-owners
+    // Branch isolation for non-owners; IMUS_ONLY forces Imus for all
     if (caller.role !== 'owner') {
       query = query.eq('branch_id', caller.branch_id!);
     } else if (branchId) {
       query = query.eq('branch_id', branchId);
+    } else if (IMUS_ONLY) {
+      const { data: imusBranch } = await adminClient
+        .from('branches').select('id').eq('code', IMUS_BRANCH_CODE).single();
+      if (imusBranch) query = query.eq('branch_id', (imusBranch as Record<string, unknown>).id as string);
     }
 
     if (customerId) query = query.eq('customer_id', customerId);

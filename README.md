@@ -210,7 +210,7 @@ Browser (Next.js Client)
 - Node.js 18+
 - A Supabase project (free tier works for dev)
 
-### Steps
+### Option A — Imus-Only Pilot (Production)
 
 ```bash
 # 1. Install dependencies
@@ -218,7 +218,7 @@ npm install
 
 # 2. Copy and fill in environment variables
 cp .env.example .env.local
-# → Edit .env.local with your Supabase keys + feature flags
+# → Set NEXT_PUBLIC_IMUS_ONLY=true
 
 # 3. Initialize the database (run in Supabase SQL Editor, in order)
 #    supabase/migrations/001_schema.sql
@@ -229,13 +229,40 @@ cp .env.example .env.local
 #    supabase/migrations/006_doctors_table.sql
 #    supabase/migrations/007_production_hardening.sql
 #    supabase/migrations/008_doctor_branch_guard.sql
-#    supabase/migrations/009_imus_only_cleanup.sql   # Imus-only: removes all other branch data
+#    supabase/migrations/009_imus_only_cleanup.sql   # Removes all non-Imus data
 
 # 4. Create the seed auth users
 npx ts-node scripts/seed-auth-users.ts
 
-# 5. Seed the product catalog and branches
-#    Run supabase/seed.sql in the Supabase SQL Editor
+# 5. Seed the Imus branch catalog only
+#    Run supabase/seed-imus.sql in the Supabase SQL Editor
+#    ⚠️ Do NOT run seed-multibranch.sql in Imus-only production
+
+# 6. Verify: SELECT code FROM branches; → should return only 'IMS'
+
+# 7. Start the dev server
+npm run dev
+```
+
+### Option B — Multi-Branch / Dev / Future Expansion
+
+```bash
+# 1. Install dependencies
+npm install
+
+# 2. Copy and fill in environment variables
+cp .env.example .env.local
+# → Set NEXT_PUBLIC_IMUS_ONLY=false
+
+# 3. Initialize the database (run in Supabase SQL Editor, in order)
+#    supabase/migrations/001_schema.sql through 008_doctor_branch_guard.sql
+#    ⚠️ Do NOT run 009_imus_only_cleanup.sql — it deletes non-Imus branches
+
+# 4. Create the seed auth users
+npx ts-node scripts/seed-auth-users.ts
+
+# 5. Seed all branches
+#    Run supabase/seed-multibranch.sql in the Supabase SQL Editor
 
 # 6. Start the dev server
 npm run dev
@@ -285,7 +312,14 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `006_doctors_table.sql` | Standalone doctors table, FK migration from profiles, RLS |
 | `007_production_hardening.sql` | Atomic checkout RPC, receipt counters, branch authorization |
 | `008_doctor_branch_guard.sql` | Doctor branch-match enforcement in commission trigger |
-| `009_imus_only_cleanup.sql` | Remove all non-Imus branch data (services, products, inventory, etc.) |
+| `009_imus_only_cleanup.sql` | **Imus pilot only** — removes non-Imus data + invariant assertions. Do NOT run for multi-branch. |
+
+### Seed Files
+
+| File | Use For |
+|---|---|
+| `seed-imus.sql` | **Imus-only pilot** — seeds only Imus branch + catalog |
+| `seed-multibranch.sql` | **Multi-branch / dev** — seeds all 11 branches + full catalog. Do NOT run in Imus-only production. |
 
 ### Table Summary
 

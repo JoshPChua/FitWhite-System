@@ -97,5 +97,74 @@ BEGIN
   GET DIAGNOSTICS v_count = ROW_COUNT;
   RAISE NOTICE 'Reassigned % profiles to Imus branch', v_count;
 
-  RAISE NOTICE '✅ Cleanup complete. Only Imus branch data remains.';
+  -- ── 4. Post-cleanup invariant checks ──────────────────────
+  --    Raise an exception if ANY non-Imus data remains.
+
+  -- branches
+  SELECT COUNT(*) INTO v_count FROM branches WHERE code != 'IMS';
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus branches remain', v_count; END IF;
+
+  -- profiles
+  SELECT COUNT(*) INTO v_count FROM profiles WHERE branch_id IS NULL;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % profiles have NULL branch_id', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM profiles WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % profiles not on Imus', v_count; END IF;
+
+  -- core branch-scoped tables
+  SELECT COUNT(*) INTO v_count FROM services WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus services', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM products WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus products', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM inventory WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus inventory', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM customers WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus customers', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM sales WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus sales', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM bundles WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus bundles', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM patient_packages WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus patient_packages', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM package_payments WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus package_payments', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM package_sessions WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus package_sessions', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM shifts WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus shifts', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM doctors WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus doctors', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM doctor_commissions WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus doctor_commissions', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM inventory_logs WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus inventory_logs', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM stock_adjustments WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus stock_adjustments', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM refunds WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus refunds', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM cash_movements WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus cash_movements', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM treatment_history WHERE branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus treatment_history', v_count; END IF;
+
+  SELECT COUNT(*) INTO v_count FROM audit_logs WHERE branch_id IS NOT NULL AND branch_id != v_imus_id;
+  IF v_count > 0 THEN RAISE EXCEPTION 'INVARIANT FAIL: % non-Imus audit_logs', v_count; END IF;
+
+  RAISE NOTICE '✅ Cleanup complete. All invariants passed. Only Imus branch data remains.';
 END $$;
