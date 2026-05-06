@@ -279,9 +279,20 @@ export async function POST(request: NextRequest) {
     const MAX_RECEIPT_RETRIES = 3;
 
     for (let attempt = 0; attempt < MAX_RECEIPT_RETRIES; attempt++) {
-      const { data: receiptData } = await adminClient
+      const { data: receiptData, error: rpcError } = await adminClient
         .rpc('generate_receipt_number', { branch_code: branchCode });
-      receiptNumber = receiptData as string;
+
+      if (rpcError || !receiptData) {
+        // Fallback: generate receipt number without atomic RPC
+        // This handles the case where migration 007 hasn't been applied yet
+        console.warn('generate_receipt_number RPC unavailable, using fallback:', rpcError?.message);
+        const now = new Date();
+        const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+        const rand = String(Math.floor(Math.random() * 9000) + 1000);
+        receiptNumber = `${branchCode}-${dateStr}-${rand}`;
+      } else {
+        receiptNumber = receiptData as string;
+      }
 
       const { data: insertedSale, error: saleError } = await adminClient
         .from('sales')
