@@ -229,6 +229,7 @@ cp .env.example .env.local
 #    supabase/migrations/006_doctors_table.sql
 #    supabase/migrations/007_production_hardening.sql
 #    supabase/migrations/008_doctor_branch_guard.sql
+#    supabase/migrations/009_imus_only_cleanup.sql   # Imus-only: removes all other branch data
 
 # 4. Create the seed auth users
 npx ts-node scripts/seed-auth-users.ts
@@ -284,6 +285,7 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `006_doctors_table.sql` | Standalone doctors table, FK migration from profiles, RLS |
 | `007_production_hardening.sql` | Atomic checkout RPC, receipt counters, branch authorization |
 | `008_doctor_branch_guard.sql` | Doctor branch-match enforcement in commission trigger |
+| `009_imus_only_cleanup.sql` | Remove all non-Imus branch data (services, products, inventory, etc.) |
 
 ### Table Summary
 
