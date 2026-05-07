@@ -84,7 +84,32 @@ export default function PackagesPage() {
 
   // ─── Fetch Packages ──────────────────────────────────────
 
-  const fetchPackages = useCallback(async () => {
+  const mapPackage = (p: Record<string, unknown>): PatientPackage => ({
+    id: p.id as string,
+    branch_id: p.branch_id as string,
+    customer_id: p.customer_id as string,
+    service_id: p.service_id as string,
+    total_price: Number(p.total_price),
+    downpayment: Number(p.downpayment),
+    total_paid: Number(p.total_paid),
+    remaining_balance: Number(p.remaining_balance),
+    total_sessions: Number(p.total_sessions),
+    sessions_used: Number(p.sessions_used),
+    status: p.status as string,
+    notes: p.notes as string | null,
+    created_at: p.created_at as string,
+    customer_name: p.customers
+      ? `${(p.customers as Record<string, unknown>).first_name} ${(p.customers as Record<string, unknown>).last_name}`
+      : 'Unknown',
+    service_name: p.services
+      ? (p.services as Record<string, unknown>).name as string
+      : 'Unknown',
+    doctor_name: p.doctors
+      ? (p.doctors as Record<string, unknown>).full_name as string
+      : null,
+  });
+
+  const fetchPackages = useCallback(async (): Promise<PatientPackage[]> => {
     setIsLoading(true);
     try {
       const branchId = selectedBranch?.id || profile?.branch_id;
@@ -95,36 +120,16 @@ export default function PackagesPage() {
       const res = await fetch(url);
       const result = await res.json();
       if (res.ok) {
-        setPackages((result.data || []).map((p: Record<string, unknown>) => ({
-          id: p.id as string,
-          branch_id: p.branch_id as string,
-          customer_id: p.customer_id as string,
-          service_id: p.service_id as string,
-          total_price: Number(p.total_price),
-          downpayment: Number(p.downpayment),
-          total_paid: Number(p.total_paid),
-          remaining_balance: Number(p.remaining_balance),
-          total_sessions: Number(p.total_sessions),
-          sessions_used: Number(p.sessions_used),
-          status: p.status as string,
-          notes: p.notes as string | null,
-          created_at: p.created_at as string,
-          customer_name: p.customers
-            ? `${(p.customers as Record<string, unknown>).first_name} ${(p.customers as Record<string, unknown>).last_name}`
-            : 'Unknown',
-          service_name: p.services
-            ? (p.services as Record<string, unknown>).name as string
-            : 'Unknown',
-          doctor_name: p.doctors
-            ? (p.doctors as Record<string, unknown>).full_name as string
-            : null,
-        })));
+        const mapped = (result.data || []).map(mapPackage);
+        setPackages(mapped);
+        return mapped;
       }
     } catch (err) {
       console.error('Packages fetch error:', err);
     } finally {
       setIsLoading(false);
     }
+    return [];
   }, [selectedBranch?.id, profile?.branch_id, isOwner, filterStatus]);
 
   useEffect(() => { fetchPackages(); }, [fetchPackages]);
@@ -187,6 +192,21 @@ export default function PackagesPage() {
     }
   };
 
+  /**
+   * After a session/payment write, re-fetch the packages list to get the
+   * DB-updated totals (sessions_used, total_paid, remaining_balance, status),
+   * then update selectedPkg so the detail modal's summary cards refresh
+   * immediately without the user needing to close and reopen the modal.
+   */
+  const refreshDetailAfterWrite = async (pkgId: string) => {
+    const freshPackages = await fetchPackages();
+    const updated = freshPackages.find(p => p.id === pkgId);
+    if (updated) {
+      setSelectedPkg(updated);
+      await openDetail(updated);
+    }
+  };
+
   // ─── Record Session ──────────────────────────────────────
 
   const handleRecordSession = async () => {
@@ -207,8 +227,7 @@ export default function PackagesPage() {
       if (!res.ok) { setFormError(result.error); return; }
       setShowSessionModal(false);
       setSessionForm({ doctor_id: '', notes: '', sessions_count: '1' });
-      await openDetail(selectedPkg);
-      fetchPackages();
+      await refreshDetailAfterWrite(selectedPkg.id);
     } catch (err) {
       console.error('Record session error:', err);
       setFormError('An unexpected error occurred');
@@ -241,8 +260,7 @@ export default function PackagesPage() {
       if (!res.ok) { setFormError(result.error); return; }
       setShowPaymentModal(false);
       setPaymentForm({ amount: '', method: 'cash', reference_number: '', notes: '' });
-      await openDetail(selectedPkg);
-      fetchPackages();
+      await refreshDetailAfterWrite(selectedPkg.id);
     } catch (err) {
       console.error('Record payment error:', err);
       setFormError('An unexpected error occurred');
