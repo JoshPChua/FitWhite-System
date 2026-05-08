@@ -495,7 +495,7 @@ Run these SQL commands **in this exact order**:
 
 ```sql
 -- Step 1: Delete all commission records (depends on sales)
-DELETE FROM commissions;
+DELETE FROM doctor_commissions;
 
 -- Step 2: Delete all refund items (depends on refunds)
 DELETE FROM refund_items;
@@ -513,7 +513,7 @@ DELETE FROM sale_items;
 DELETE FROM sales;
 
 -- Step 7: Reset the receipt counter to start from 1
-UPDATE branches SET receipt_counter = 0;
+DELETE FROM receipt_counters;
 
 -- Step 8: Delete all package sessions (depends on packages)
 DELETE FROM package_sessions;
