@@ -58,6 +58,7 @@ export default function ShiftsPage() {
   // Cash movements list
   const [movements, setMovements] = useState<CashMovement[]>([]);
   const [loadingMovements, setLoadingMovements] = useState(false);
+  const [movementVersion, setMovementVersion] = useState(0);
 
   const [formError, setFormError] = useState('');
 
@@ -122,7 +123,7 @@ export default function ShiftsPage() {
         })));
       })
       .finally(() => setLoadingMovements(false));
-  }, [openShift?.id]);
+  }, [openShift?.id, movementVersion]);
 
   // ─── Open Shift ───────────────────────────────────────────
 
@@ -200,6 +201,7 @@ export default function ShiftsPage() {
       if (!res.ok) { setFormError(result.error); return; }
       setShowCashModal(false);
       setCashForm({ movement_type: 'petty_cash_out', amount: '', description: '', reference: '' });
+      setMovementVersion(v => v + 1);
       fetchShifts();
     } catch (err) {
       console.error(err);
