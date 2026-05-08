@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { Profile } from '@/types/database';
+import {
+  requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
+} from '@/lib/api-helpers';
 
 /**
  * POST /api/shifts/[id]/close
@@ -10,6 +12,10 @@ import type { Profile } from '@/types/database';
  * sales + cash movements during that shift, and records the variance.
  *
  * Body: { closing_cash, notes? }
+ *
+ * Hardened:
+ *   - Imus-only guard on the shift's branch
+ *   - Uses shared api-helpers for auth and error responses
  */
 export async function POST(
   request: NextRequest,
@@ -18,14 +24,12 @@ export async function POST(
   try {
     const { id: shiftId } = await params;
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active || (caller.role !== 'owner' && caller.role !== 'manager')) {
-      return NextResponse.json({ error: 'Manager or owner required to close shifts' }, { status: 403 });
+    if (caller.role !== 'owner' && caller.role !== 'manager') {
+      return jsonError('Manager or owner required to close shifts', 403);
     }
 
     const body = await request.json();
@@ -35,7 +39,7 @@ export async function POST(
     };
 
     if (closing_cash === undefined || closing_cash < 0) {
-      return NextResponse.json({ error: 'closing_cash is required and must be >= 0' }, { status: 400 });
+      return jsonError('closing_cash is required and must be >= 0', 400);
     }
 
     const adminClient = createAdminClient();
@@ -49,13 +53,21 @@ export async function POST(
       .single();
 
     if (!shift) {
-      return NextResponse.json({ error: 'Open shift not found' }, { status: 404 });
+      return jsonError('Open shift not found', 404);
     }
 
     const shiftData = shift as Record<string, unknown>;
     const branchId = shiftData.branch_id as string;
     const openingCash = shiftData.opening_cash as number;
 
+    // Imus-only guard on the shift's branch
+    const imusGuard = await enforceImusOnly(adminClient, branchId);
+    if (imusGuard) return imusGuard;
+
+    // Branch isolation for managers
+    if (caller.role === 'manager' && caller.branch_id !== branchId) {
+      return jsonError('Cannot close shifts for another branch', 403);
+    }
 
     // Compute expected cash: fetch sales linked to this shift, then their cash payments
     const { data: shiftSales } = await adminClient
@@ -104,7 +116,7 @@ export async function POST(
       .update({
         closing_cash: closing_cash,
         expected_cash: expectedCash,
-        closed_by: user.id,
+        closed_by: userId,
         status: 'closed',
         notes: notes || null,
         closed_at: new Date().toISOString(),
@@ -114,13 +126,13 @@ export async function POST(
       .single();
 
     if (closeError) {
-      return NextResponse.json({ error: closeError.message }, { status: 500 });
+      return jsonError(closeError.message, 500);
     }
 
     // Audit log
     const variance = closing_cash - expectedCash;
     await adminClient.from('audit_logs').insert({
-      user_id: user.id,
+      user_id: userId,
       branch_id: branchId,
       action_type: 'SHIFT_CLOSED',
       entity_type: 'shift',
@@ -132,6 +144,6 @@ export async function POST(
     return NextResponse.json({ data: closedShift });
   } catch (error) {
     console.error('POST /api/shifts/[id]/close error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }

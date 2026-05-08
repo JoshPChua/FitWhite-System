@@ -1,11 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { Profile } from '@/types/database';
+import {
+  requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
+} from '@/lib/api-helpers';
+import { IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
 
 /**
  * PATCH /api/doctors/[id]
  * Update a doctor record.
+ *
+ * Hardened: Imus-only guard on the doctor's branch.
  */
 export async function PATCH(
   request: NextRequest,
@@ -14,14 +19,31 @@ export async function PATCH(
   try {
     const { id: doctorId } = await params;
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active || (caller.role !== 'owner' && caller.role !== 'manager')) {
-      return NextResponse.json({ error: 'Manager or owner required' }, { status: 403 });
+    if (caller.role !== 'owner' && caller.role !== 'manager') {
+      return jsonError('Manager or owner required', 403);
+    }
+
+    const adminClient = createAdminClient();
+
+    // Fetch existing doctor
+    const { data: existing } = await adminClient
+      .from('doctors').select('*').eq('id', doctorId).single();
+
+    if (!existing) return jsonError('Doctor not found', 404);
+
+    const doc = existing as Record<string, unknown>;
+
+    // Imus-only: reject if doctor belongs to non-Imus branch
+    const imusGuard = await enforceImusOnly(adminClient, doc.branch_id as string);
+    if (imusGuard) return imusGuard;
+
+    // Branch check for managers
+    if (caller.role === 'manager' && doc.branch_id !== caller.branch_id) {
+      return jsonError('Cannot modify doctors outside your branch', 403);
     }
 
     const body = await request.json();
@@ -39,18 +61,7 @@ export async function PATCH(
     }
 
     if (Object.keys(updateData).length === 0) {
-      return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
-    }
-
-    const adminClient = createAdminClient();
-
-    // Branch check for managers
-    if (caller.role === 'manager') {
-      const { data: existing } = await adminClient
-        .from('doctors').select('branch_id').eq('id', doctorId).single();
-      if (!existing || (existing as Record<string, unknown>).branch_id !== caller.branch_id) {
-        return NextResponse.json({ error: 'Cannot modify doctors outside your branch' }, { status: 403 });
-      }
+      return jsonError('No fields to update', 400);
     }
 
     const { data, error } = await adminClient
@@ -60,12 +71,12 @@ export async function PATCH(
       .select('*')
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    if (!data) return NextResponse.json({ error: 'Doctor not found' }, { status: 404 });
+    if (error) return jsonError(error.message, 500);
+    if (!data) return jsonError('Doctor not found', 404);
 
     // Audit
     await adminClient.from('audit_logs').insert({
-      user_id: user.id,
+      user_id: userId,
       branch_id: (data as Record<string, unknown>).branch_id as string,
       action_type: 'UPDATE_DOCTOR',
       entity_type: 'doctor',
@@ -77,13 +88,15 @@ export async function PATCH(
     return NextResponse.json({ data });
   } catch (error) {
     console.error('PATCH /api/doctors/[id] error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }
 
 /**
  * DELETE /api/doctors/[id]
  * Soft-delete (deactivate) a doctor. Owner only.
+ *
+ * Hardened: Imus-only guard.
  */
 export async function DELETE(
   request: NextRequest,
@@ -92,17 +105,28 @@ export async function DELETE(
   try {
     const { id: doctorId } = await params;
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || caller.role !== 'owner') {
-      return NextResponse.json({ error: 'Owner only' }, { status: 403 });
+    if (caller.role !== 'owner') {
+      return jsonError('Owner only', 403);
     }
 
     const adminClient = createAdminClient();
+
+    // Fetch doctor to check branch
+    const { data: existing } = await adminClient
+      .from('doctors').select('*').eq('id', doctorId).single();
+
+    if (!existing) return jsonError('Doctor not found', 404);
+
+    const doc = existing as Record<string, unknown>;
+
+    // Imus-only guard
+    const imusGuard = await enforceImusOnly(adminClient, doc.branch_id as string);
+    if (imusGuard) return imusGuard;
+
     const { data, error } = await adminClient
       .from('doctors')
       .update({ is_active: false } as Record<string, unknown>)
@@ -110,10 +134,10 @@ export async function DELETE(
       .select('*')
       .single();
 
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (error) return jsonError(error.message, 500);
 
     await adminClient.from('audit_logs').insert({
-      user_id: user.id,
+      user_id: userId,
       branch_id: (data as Record<string, unknown>).branch_id as string,
       action_type: 'DEACTIVATE_DOCTOR',
       entity_type: 'doctor',
@@ -124,6 +148,6 @@ export async function DELETE(
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('DELETE /api/doctors/[id] error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }

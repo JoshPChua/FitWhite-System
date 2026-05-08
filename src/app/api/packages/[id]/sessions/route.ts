@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { Profile } from '@/types/database';
+import {
+  requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
+} from '@/lib/api-helpers';
 
 /**
  * POST /api/packages/[id]/sessions
@@ -11,6 +13,8 @@ import type { Profile } from '@/types/database';
  * inside a single transaction. Any failure → automatic full rollback.
  *
  * Body: { sessions_count?, doctor_id?, notes? }
+ *
+ * Hardened: Imus-only guard on the package's branch.
  */
 export async function POST(
   request: NextRequest,
@@ -19,15 +23,9 @@ export async function POST(
   try {
     const { id: packageId } = await params;
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
     const body = await request.json();
     const {
@@ -41,7 +39,7 @@ export async function POST(
     };
 
     if (sessions_count < 1) {
-      return NextResponse.json({ error: 'sessions_count must be >= 1' }, { status: 400 });
+      return jsonError('sessions_count must be >= 1', 400);
     }
 
     const adminClient = createAdminClient();
@@ -54,14 +52,18 @@ export async function POST(
       .single();
 
     if (!pkg) {
-      return NextResponse.json({ error: 'Package not found' }, { status: 404 });
+      return jsonError('Package not found', 404);
     }
 
     const branchId = (pkg as Record<string, unknown>).branch_id as string;
 
+    // Imus-only guard
+    const imusGuard = await enforceImusOnly(adminClient, branchId);
+    if (imusGuard) return imusGuard;
+
     // Branch isolation
     if (caller.role !== 'owner' && caller.branch_id !== branchId) {
-      return NextResponse.json({ error: 'Cannot consume sessions for another branch' }, { status: 403 });
+      return jsonError('Cannot consume sessions for another branch', 403);
     }
 
     // ─── Atomic RPC: session + BOM + commission in one transaction ───
@@ -69,7 +71,7 @@ export async function POST(
       .rpc('consume_package_session', {
         p_package_id: packageId,
         p_branch_id: branchId,
-        p_performed_by: user.id,
+        p_performed_by: userId,
         p_doctor_id: doctor_id || null,
         p_sessions_count: sessions_count,
         p_notes: notes || null,
@@ -77,14 +79,14 @@ export async function POST(
 
     if (rpcError) {
       // Surface the Postgres error message directly
-      return NextResponse.json({ error: rpcError.message }, { status: 500 });
+      return jsonError(rpcError.message, 500);
     }
 
     const rpcResult = result as Record<string, unknown>;
 
     // Audit log (non-critical, outside transaction)
     await adminClient.from('audit_logs').insert({
-      user_id: user.id,
+      user_id: userId,
       branch_id: branchId,
       action_type: 'SESSION_CONSUMED',
       entity_type: 'package_session',
@@ -96,7 +98,7 @@ export async function POST(
     return NextResponse.json({ data: rpcResult }, { status: 201 });
   } catch (error) {
     console.error('POST /api/packages/[id]/sessions error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }
 
@@ -105,6 +107,8 @@ export async function POST(
  *
  * Lists all session records for a given package.
  * Requires caller profile lookup + branch isolation.
+ *
+ * Hardened: Imus-only guard.
  */
 export async function GET(
   _request: NextRequest,
@@ -113,16 +117,9 @@ export async function GET(
   try {
     const { id: packageId } = await params;
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    // Caller profile + active check
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { profile: caller } = auth;
 
     const adminClient = createAdminClient();
 
@@ -134,14 +131,18 @@ export async function GET(
       .single();
 
     if (!pkg) {
-      return NextResponse.json({ error: 'Package not found' }, { status: 404 });
+      return jsonError('Package not found', 404);
     }
 
     const pkgBranch = (pkg as Record<string, unknown>).branch_id as string;
 
+    // Imus-only guard
+    const imusGuard = await enforceImusOnly(adminClient, pkgBranch);
+    if (imusGuard) return imusGuard;
+
     // Branch isolation: non-owners can only see their own branch
     if (caller.role !== 'owner' && caller.branch_id !== pkgBranch) {
-      return NextResponse.json({ error: 'Access denied: package belongs to another branch' }, { status: 403 });
+      return jsonError('Access denied: package belongs to another branch', 403);
     }
 
     const { data, error } = await adminClient
@@ -155,12 +156,12 @@ export async function GET(
       .order('created_at', { ascending: false });
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return jsonError(error.message, 500);
     }
 
     return NextResponse.json({ data: data || [] });
   } catch (error) {
     console.error('GET /api/packages/[id]/sessions error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }

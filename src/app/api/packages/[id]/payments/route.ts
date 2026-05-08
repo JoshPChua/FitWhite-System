@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { Profile } from '@/types/database';
+import {
+  requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
+} from '@/lib/api-helpers';
 
 /**
  * POST /api/packages/[id]/payments
@@ -10,6 +12,8 @@ import type { Profile } from '@/types/database';
  * The DB trigger sync_package_total_paid enforces the over-payment guard.
  *
  * Body: { amount, method, reference_number?, notes? }
+ *
+ * Hardened: Imus-only guard on the package's branch.
  */
 export async function POST(
   request: NextRequest,
@@ -18,15 +22,9 @@ export async function POST(
   try {
     const { id: packageId } = await params;
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
     const body = await request.json();
     const {
@@ -41,8 +39,8 @@ export async function POST(
       notes?: string | null;
     };
 
-    if (!amount || amount <= 0) {
-      return NextResponse.json({ error: 'amount must be > 0' }, { status: 400 });
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      return jsonError('amount must be a finite number > 0', 400);
     }
 
     const adminClient = createAdminClient();
@@ -55,27 +53,32 @@ export async function POST(
       .single();
 
     if (!pkg) {
-      return NextResponse.json({ error: 'Package not found' }, { status: 404 });
+      return jsonError('Package not found', 404);
     }
 
     const pkgData = pkg as Record<string, unknown>;
     const branchId = pkgData.branch_id as string;
 
+    // Imus-only guard
+    const imusGuard = await enforceImusOnly(adminClient, branchId);
+    if (imusGuard) return imusGuard;
+
     if (pkgData.status !== 'active') {
-      return NextResponse.json({ error: `Package is ${pkgData.status} — cannot accept payments` }, { status: 400 });
+      return jsonError(`Package is ${pkgData.status} — cannot accept payments`, 400);
     }
 
     // Branch isolation
     if (caller.role !== 'owner' && caller.branch_id !== branchId) {
-      return NextResponse.json({ error: 'Cannot make payments for another branch' }, { status: 403 });
+      return jsonError('Cannot make payments for another branch', 403);
     }
 
     // App-level check before the trigger does its enforcement
     const remainingBalance = (pkgData.total_price as number) - (pkgData.total_paid as number);
     if (amount > remainingBalance + 0.01) {
-      return NextResponse.json({
-        error: `Payment exceeds remaining balance. Balance: ₱${remainingBalance.toFixed(2)}, Payment: ₱${amount.toFixed(2)}`
-      }, { status: 400 });
+      return jsonError(
+        `Payment exceeds remaining balance. Balance: ₱${remainingBalance.toFixed(2)}, Payment: ₱${amount.toFixed(2)}`,
+        400,
+      );
     }
 
     // Insert payment (DB trigger updates total_paid & enforces over-payment guard)
@@ -84,7 +87,7 @@ export async function POST(
       .insert({
         package_id: packageId,
         branch_id: branchId,
-        received_by: user.id,
+        received_by: userId,
         amount,
         method,
         reference_number: reference_number || null,
@@ -96,16 +99,17 @@ export async function POST(
     if (paymentError) {
       // Check for the over-payment trigger error
       if (paymentError.message.includes('Payment rejected') || paymentError.code === '23514') {
-        return NextResponse.json({
-          error: 'Payment rejected: total payments would exceed the package total price.'
-        }, { status: 400 });
+        return jsonError(
+          'Payment rejected: total payments would exceed the package total price.',
+          400,
+        );
       }
-      return NextResponse.json({ error: paymentError.message }, { status: 500 });
+      return jsonError(paymentError.message, 500);
     }
 
     // Audit log
     await adminClient.from('audit_logs').insert({
-      user_id: user.id,
+      user_id: userId,
       branch_id: branchId,
       action_type: 'PACKAGE_PAYMENT',
       entity_type: 'package_payment',
@@ -117,7 +121,7 @@ export async function POST(
     return NextResponse.json({ data: payment }, { status: 201 });
   } catch (error) {
     console.error('POST /api/packages/[id]/payments error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }
 
@@ -126,6 +130,8 @@ export async function POST(
  *
  * Lists all payment records for a given package.
  * Requires caller profile lookup + branch isolation.
+ *
+ * Hardened: Imus-only guard.
  */
 export async function GET(
   _request: NextRequest,
@@ -134,16 +140,9 @@ export async function GET(
   try {
     const { id: packageId } = await params;
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    // Caller profile + active check
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { profile: caller } = auth;
 
     const adminClient = createAdminClient();
 
@@ -155,14 +154,18 @@ export async function GET(
       .single();
 
     if (!pkg) {
-      return NextResponse.json({ error: 'Package not found' }, { status: 404 });
+      return jsonError('Package not found', 404);
     }
 
     const pkgBranch = (pkg as Record<string, unknown>).branch_id as string;
 
+    // Imus-only guard
+    const imusGuard = await enforceImusOnly(adminClient, pkgBranch);
+    if (imusGuard) return imusGuard;
+
     // Branch isolation: non-owners can only see their own branch
     if (caller.role !== 'owner' && caller.branch_id !== pkgBranch) {
-      return NextResponse.json({ error: 'Access denied: package belongs to another branch' }, { status: 403 });
+      return jsonError('Access denied: package belongs to another branch', 403);
     }
 
     const { data, error } = await adminClient
@@ -175,13 +178,12 @@ export async function GET(
       .order('created_at', { ascending: false });
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return jsonError(error.message, 500);
     }
 
     return NextResponse.json({ data: data || [] });
   } catch (error) {
     console.error('GET /api/packages/[id]/payments error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }
-

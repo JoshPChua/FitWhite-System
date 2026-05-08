@@ -1,32 +1,41 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import type { Profile } from '@/types/database';
+import {
+  requireActiveProfile, enforceImusOnly, assertBranchAccess,
+  isErrorResponse, jsonError,
+} from '@/lib/api-helpers';
+import { IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
 
 /**
  * GET /api/shifts?branch_id=X&status=open|closed
  *
  * Lists shifts for a branch.
+ *
+ * Hardened: Imus-only forces Imus branch (ignores query param).
  */
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { profile: caller } = auth;
 
     const status = request.nextUrl.searchParams.get('status');
     const adminClient = createAdminClient();
 
-    const branchId = caller.role === 'owner'
-      ? (request.nextUrl.searchParams.get('branch_id') || caller.branch_id)
-      : caller.branch_id;
+    // Determine effective branch — Imus-only forces Imus
+    let branchId: string | null;
+    if (IMUS_ONLY) {
+      const { data: imusBranch } = await adminClient
+        .from('branches').select('id').eq('code', IMUS_BRANCH_CODE).single();
+      if (!imusBranch) return jsonError('Imus branch not found', 500);
+      branchId = (imusBranch as Record<string, unknown>).id as string;
+    } else {
+      branchId = caller.role === 'owner'
+        ? (request.nextUrl.searchParams.get('branch_id') || caller.branch_id)
+        : caller.branch_id;
+    }
 
     let query = adminClient
       .from('shifts')
@@ -44,13 +53,13 @@ export async function GET(request: NextRequest) {
     const { data, error } = await query;
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return jsonError(error.message, 500);
     }
 
     return NextResponse.json({ data: data || [] });
   } catch (error) {
     console.error('GET /api/shifts error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }
 
@@ -60,18 +69,18 @@ export async function GET(request: NextRequest) {
  * Opens a new shift. The DB partial unique index ensures only one open shift per branch.
  *
  * Body: { branch_id, opening_cash }
+ *
+ * Hardened: Imus-only guard on branch_id.
  */
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', user.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active || (caller.role !== 'owner' && caller.role !== 'manager')) {
-      return NextResponse.json({ error: 'Manager or owner required to open shifts' }, { status: 403 });
+    if (caller.role !== 'owner' && caller.role !== 'manager') {
+      return jsonError('Manager or owner required to open shifts', 403);
     }
 
     const body = await request.json();
@@ -81,21 +90,24 @@ export async function POST(request: NextRequest) {
     };
 
     if (!branch_id) {
-      return NextResponse.json({ error: 'branch_id is required' }, { status: 400 });
+      return jsonError('branch_id is required', 400);
     }
 
     // Branch isolation
-    if (caller.role !== 'owner' && caller.branch_id !== branch_id) {
-      return NextResponse.json({ error: 'Cannot open shifts for another branch' }, { status: 403 });
-    }
+    const branchErr = assertBranchAccess(caller, branch_id, 'open shifts');
+    if (branchErr) return branchErr;
 
     const adminClient = createAdminClient();
+
+    // Imus-only guard
+    const imusGuard = await enforceImusOnly(adminClient, branch_id);
+    if (imusGuard) return imusGuard;
 
     const { data: shift, error: shiftError } = await adminClient
       .from('shifts')
       .insert({
         branch_id,
-        opened_by: user.id,
+        opened_by: userId,
         opening_cash,
         status: 'open',
       } as Record<string, unknown>)
@@ -105,16 +117,17 @@ export async function POST(request: NextRequest) {
     if (shiftError) {
       // Unique index violation — already an open shift
       if (shiftError.code === '23505') {
-        return NextResponse.json({
-          error: 'A shift is already open for this branch. Close the current shift first.'
-        }, { status: 409 });
+        return jsonError(
+          'A shift is already open for this branch. Close the current shift first.',
+          409,
+        );
       }
-      return NextResponse.json({ error: shiftError.message }, { status: 500 });
+      return jsonError(shiftError.message, 500);
     }
 
     // Audit log
     await adminClient.from('audit_logs').insert({
-      user_id: user.id,
+      user_id: userId,
       branch_id,
       action_type: 'SHIFT_OPENED',
       entity_type: 'shift',
@@ -126,6 +139,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ data: shift }, { status: 201 });
   } catch (error) {
     console.error('POST /api/shifts error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }

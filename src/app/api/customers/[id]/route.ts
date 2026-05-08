@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import {
+  requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
+} from '@/lib/api-helpers';
 import { IMUS_ONLY } from '@/lib/feature-flags';
 import type { Profile } from '@/types/database';
 
@@ -9,6 +12,8 @@ import type { Profile } from '@/types/database';
  * Requires: owner or manager role
  * Managers can only update customers in their own branch.
  * No branch reassignment in IMUS_ONLY mode.
+ *
+ * Hardened: Imus-only guard — owners cannot access non-Imus customers via direct URL.
  */
 export async function PATCH(
   request: NextRequest,
@@ -17,18 +22,12 @@ export async function PATCH(
   try {
     const { id: customerId } = await params;
     const supabase = await createClient();
-    const { data: { user: currentUser } } = await supabase.auth.getUser();
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
-    if (!currentUser) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const { data: rawCaller } = await supabase
-      .from('profiles').select('*').eq('id', currentUser.id).single();
-    const callerProfile = rawCaller as Profile | null;
-
-    if (!callerProfile || (callerProfile.role !== 'owner' && callerProfile.role !== 'manager')) {
-      return NextResponse.json({ error: 'Forbidden: owner or manager required' }, { status: 403 });
+    if (caller.role !== 'owner' && caller.role !== 'manager') {
+      return jsonError('Forbidden: owner or manager required', 403);
     }
 
     const adminClient = createAdminClient();
@@ -38,17 +37,18 @@ export async function PATCH(
       .from('customers').select('*').eq('id', customerId).single();
 
     if (!rawCustomer) {
-      return NextResponse.json({ error: 'Customer not found' }, { status: 404 });
+      return jsonError('Customer not found', 404);
     }
 
     const existingCustomer = rawCustomer as Record<string, unknown>;
 
+    // Imus-only guard: cannot access customers outside Imus branch
+    const imusGuard = await enforceImusOnly(adminClient, existingCustomer.branch_id as string);
+    if (imusGuard) return imusGuard;
+
     // Manager can only modify customers in their own branch
-    if (callerProfile.role === 'manager' && existingCustomer.branch_id !== callerProfile.branch_id) {
-      return NextResponse.json(
-        { error: 'Cannot modify customers outside your branch' },
-        { status: 403 }
-      );
+    if (caller.role === 'manager' && existingCustomer.branch_id !== caller.branch_id) {
+      return jsonError('Cannot modify customers outside your branch', 403);
     }
 
     const body = await request.json();
@@ -64,17 +64,14 @@ export async function PATCH(
     // Prevent branch reassignment in IMUS_ONLY
     if (body.branch_id !== undefined && !IMUS_ONLY) {
       // In multi-branch, owner can reassign; manager cannot
-      if (callerProfile.role === 'manager' && body.branch_id !== callerProfile.branch_id) {
-        return NextResponse.json(
-          { error: 'Managers cannot transfer customers to other branches' },
-          { status: 403 }
-        );
+      if (caller.role === 'manager' && body.branch_id !== caller.branch_id) {
+        return jsonError('Managers cannot transfer customers to other branches', 403);
       }
       updateData.branch_id = body.branch_id;
     }
 
     if (Object.keys(updateData).length === 0) {
-      return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
+      return jsonError('No fields to update', 400);
     }
 
     const { data: updated, error: updateError } = await adminClient
@@ -85,12 +82,12 @@ export async function PATCH(
       .single();
 
     if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+      return jsonError(updateError.message, 500);
     }
 
     // Audit log
     await adminClient.from('audit_logs').insert({
-      user_id: currentUser.id,
+      user_id: userId,
       branch_id: existingCustomer.branch_id as string,
       action_type: 'UPDATE_CUSTOMER',
       entity_type: 'customer',
@@ -102,13 +99,15 @@ export async function PATCH(
     return NextResponse.json({ success: true, customer: updated });
   } catch (error) {
     console.error('PATCH /api/customers/[id] error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }
 
 /**
  * DELETE /api/customers/[id] — Delete a customer
  * Requires: owner role only
+ *
+ * Hardened: Imus-only guard.
  */
 export async function DELETE(
   request: NextRequest,
@@ -117,42 +116,40 @@ export async function DELETE(
   try {
     const { id: customerId } = await params;
     const supabase = await createClient();
-    const { data: { user: currentUser } } = await supabase.auth.getUser();
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
-    if (!currentUser) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const { data: rawCaller } = await supabase
-      .from('profiles').select('*').eq('id', currentUser.id).single();
-    const callerProfile = rawCaller as Profile | null;
-
-    if (!callerProfile || callerProfile.role !== 'owner') {
-      return NextResponse.json({ error: 'Only owners can delete customers' }, { status: 403 });
+    if (caller.role !== 'owner') {
+      return jsonError('Only owners can delete customers', 403);
     }
 
     const adminClient = createAdminClient();
 
-    // Get customer for audit log
+    // Get customer for audit log and branch check
     const { data: rawCustomer } = await adminClient
       .from('customers').select('*').eq('id', customerId).single();
 
     if (!rawCustomer) {
-      return NextResponse.json({ error: 'Customer not found' }, { status: 404 });
+      return jsonError('Customer not found', 404);
     }
 
     const customer = rawCustomer as Record<string, unknown>;
+
+    // Imus-only guard
+    const imusGuard = await enforceImusOnly(adminClient, customer.branch_id as string);
+    if (imusGuard) return imusGuard;
 
     const { error: deleteError } = await adminClient
       .from('customers').delete().eq('id', customerId);
 
     if (deleteError) {
-      return NextResponse.json({ error: deleteError.message }, { status: 500 });
+      return jsonError(deleteError.message, 500);
     }
 
     // Audit log
     await adminClient.from('audit_logs').insert({
-      user_id: currentUser.id,
+      user_id: userId,
       branch_id: customer.branch_id as string,
       action_type: 'DELETE_CUSTOMER',
       entity_type: 'customer',
@@ -164,6 +161,6 @@ export async function DELETE(
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('DELETE /api/customers/[id] error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }

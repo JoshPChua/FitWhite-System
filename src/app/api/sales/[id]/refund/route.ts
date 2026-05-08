@@ -1,16 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import {
+  requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
+} from '@/lib/api-helpers';
 import type { Profile } from '@/types/database';
 
 /**
  * POST /api/sales/[id]/refund
  *
- * Security fixes applied:
- *   [P1] Amount check now accounts for ALL prior refunds — cumulative refunds
- *        cannot exceed the original sale total.
- *   [P1] refund_items[].sale_item_id is validated to belong to this sale, and
- *        the requested quantity cannot exceed the still-refundable quantity.
+ * Creates a refund with full rollback-ledger protection:
+ *   - Every write is error-checked
+ *   - refund_items failure → rollback refund row
+ *   - Inventory update failure → rollback refund + items
+ *   - Stock adjustment/log failure → restore previous inventory qty
+ *   - Sale status update failure → rollback all refund side-effects
+ *   - Cumulative refund cap (cannot exceed original sale total)
+ *   - refund_items must belong to this sale; qty cannot exceed refundable amount
+ *   - refund_items amount and quantity validated as positive numbers
  */
 export async function POST(
   request: NextRequest,
@@ -19,14 +26,12 @@ export async function POST(
   try {
     const { id: saleId } = await params;
     const supabase = await createClient();
-    const { data: { user: currentUser } } = await supabase.auth.getUser();
-    if (!currentUser) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { userId, profile: caller } = auth;
 
-    const { data: rawProfile } = await supabase
-      .from('profiles').select('*').eq('id', currentUser.id).single();
-    const caller = rawProfile as Profile | null;
-    if (!caller || caller.role === 'cashier') {
-      return NextResponse.json({ error: 'Forbidden — manager or owner required' }, { status: 403 });
+    if (caller.role === 'cashier') {
+      return jsonError('Forbidden — manager or owner required', 403);
     }
 
     const body = await request.json();
@@ -46,28 +51,48 @@ export async function POST(
       refund_items: Array<{ sale_item_id: string; quantity: number; amount: number }>;
     };
 
-    if (!amount || amount <= 0) return NextResponse.json({ error: 'Invalid refund amount' }, { status: 400 });
-    if (!reason?.trim()) return NextResponse.json({ error: 'Refund reason is required' }, { status: 400 });
+    // ─── Input validation ────────────────────────────────────
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      return jsonError('Invalid refund amount — must be a positive number', 400);
+    }
+    if (!reason?.trim()) {
+      return jsonError('Refund reason is required', 400);
+    }
+
+    // Validate each refund_item has positive numbers
+    for (const ri of refund_items) {
+      if (typeof ri.quantity !== 'number' || !Number.isFinite(ri.quantity) || ri.quantity <= 0) {
+        return jsonError(`Invalid quantity for refund item ${ri.sale_item_id} — must be > 0`, 400);
+      }
+      if (typeof ri.amount !== 'number' || !Number.isFinite(ri.amount) || ri.amount <= 0) {
+        return jsonError(`Invalid amount for refund item ${ri.sale_item_id} — must be > 0`, 400);
+      }
+    }
 
     const adminClient = createAdminClient();
+
+    // ─── Imus-only guard ─────────────────────────────────────
 
     // Fetch sale
     const { data: saleData, error: saleError } = await adminClient
       .from('sales').select('*').eq('id', saleId).single();
     if (saleError || !saleData) {
-      return NextResponse.json({ error: 'Sale not found' }, { status: 404 });
+      return jsonError('Sale not found', 404);
     }
     const sale = saleData as Record<string, unknown>;
 
+    // Imus-only enforcement: refund must be on an Imus-branch sale
+    const imusGuard = await enforceImusOnly(adminClient, sale.branch_id as string);
+    if (imusGuard) return imusGuard;
+
     if (caller.role === 'manager' && caller.branch_id !== sale.branch_id) {
-      return NextResponse.json({ error: 'Cannot refund sales from another branch' }, { status: 403 });
+      return jsonError('Cannot refund sales from another branch', 403);
     }
     if (sale.status === 'voided' || sale.status === 'refunded') {
-      return NextResponse.json({ error: `Cannot refund a ${sale.status} sale` }, { status: 400 });
+      return jsonError(`Cannot refund a ${sale.status} sale`, 400);
     }
 
-    // ─── [P1 FIX] Cumulative refund check ───────────────────
-    // Fetch the sum of all prior refunds on this sale.
+    // ─── Cumulative refund check ─────────────────────────────
     const { data: priorRefundsData } = await adminClient
       .from('refunds')
       .select('amount')
@@ -79,25 +104,26 @@ export async function POST(
     const saleTotal = sale.total as number;
     const remainingRefundable = saleTotal - priorRefundTotal;
 
-    if (amount > remainingRefundable) {
-      return NextResponse.json({
-        error: `Refund amount (₱${amount.toFixed(2)}) exceeds remaining refundable amount ` +
-               `(₱${remainingRefundable.toFixed(2)} of original ₱${saleTotal.toFixed(2)})`
-      }, { status: 400 });
+    if (amount > remainingRefundable + 0.01) {
+      return jsonError(
+        `Refund amount (₱${amount.toFixed(2)}) exceeds remaining refundable amount ` +
+        `(₱${remainingRefundable.toFixed(2)} of original ₱${saleTotal.toFixed(2)})`,
+        400,
+      );
     }
 
-    // ─── [P1 FIX] Validate refund_items belong to this sale ─
+    // ─── Validate refund_items belong to this sale ───────────
+    // Build a lookup from sale_items for validation and inventory restoration
+    const { data: salItemsData } = await adminClient
+      .from('sale_items')
+      .select('id, quantity, item_type, product_id')
+      .eq('sale_id', saleId);
+
+    const validSaleItems = new Map(
+      ((salItemsData || []) as Record<string, unknown>[]).map(si => [si.id as string, si])
+    );
+
     if (refund_items.length > 0) {
-      // Fetch all valid sale items for this sale
-      const { data: salItemsData } = await adminClient
-        .from('sale_items')
-        .select('id, quantity, item_type, product_id')
-        .eq('sale_id', saleId);
-
-      const validSaleItems = new Map(
-        ((salItemsData || []) as Record<string, unknown>[]).map(si => [si.id as string, si])
-      );
-
       // Fetch already-refunded quantities per sale_item
       const { data: priorItemsData } = await adminClient
         .from('refund_items')
@@ -113,9 +139,10 @@ export async function POST(
       for (const ri of refund_items) {
         // Must belong to this sale
         if (!validSaleItems.has(ri.sale_item_id)) {
-          return NextResponse.json({
-            error: `sale_item_id ${ri.sale_item_id} does not belong to sale ${saleId}`
-          }, { status: 400 });
+          return jsonError(
+            `sale_item_id ${ri.sale_item_id} does not belong to sale ${saleId}`,
+            400,
+          );
         }
 
         const saleItem = validSaleItems.get(ri.sale_item_id)!;
@@ -124,13 +151,51 @@ export async function POST(
         const stillRefundable = originalQty - alreadyRefunded;
 
         if (ri.quantity > stillRefundable) {
-          return NextResponse.json({
-            error: `Requested refund quantity (${ri.quantity}) exceeds still-refundable ` +
-                   `quantity (${stillRefundable}) for item ${ri.sale_item_id}`
-          }, { status: 400 });
+          return jsonError(
+            `Requested refund quantity (${ri.quantity}) exceeds still-refundable ` +
+            `quantity (${stillRefundable}) for item ${ri.sale_item_id}`,
+            400,
+          );
         }
       }
     }
+
+    // ─── Rollback ledger ─────────────────────────────────────
+    // Tracks all successful writes so any subsequent failure can undo them.
+
+    interface StockMutation {
+      inventoryId: string;
+      quantityBefore: number;
+    }
+    const stockMutations: StockMutation[] = [];
+    let refundId: string | null = null;
+    let refundItemsInserted = false;
+
+    const rollback = async () => {
+      try {
+        // Reverse stock mutations (in reverse order)
+        for (const m of [...stockMutations].reverse()) {
+          await adminClient.from('inventory')
+            .update({ quantity: m.quantityBefore } as Record<string, unknown>)
+            .eq('id', m.inventoryId);
+        }
+        // Remove stock adjustments and logs for this refund
+        if (refundId) {
+          await adminClient.from('stock_adjustments').delete().eq('reference_id', saleId);
+          await adminClient.from('inventory_logs').delete().eq('sale_id', saleId);
+        }
+        // Remove refund items
+        if (refundId && refundItemsInserted) {
+          await adminClient.from('refund_items').delete().eq('refund_id', refundId);
+        }
+        // Remove refund record
+        if (refundId) {
+          await adminClient.from('refunds').delete().eq('id', refundId);
+        }
+      } catch (rbErr) {
+        console.error('Refund rollback error (may be partially written):', rbErr);
+      }
+    };
 
     // ─── Create refund record ────────────────────────────────
 
@@ -139,7 +204,7 @@ export async function POST(
       .insert({
         sale_id: saleId,
         branch_id: sale.branch_id as string,
-        user_id: currentUser.id,
+        user_id: userId,
         refund_type,
         amount,
         reason,
@@ -149,10 +214,10 @@ export async function POST(
       .select('id')
       .single();
 
-    if (refundError) return NextResponse.json({ error: refundError.message }, { status: 500 });
-    const refundId = (refundData as Record<string, unknown>).id as string;
+    if (refundError) return jsonError(refundError.message, 500);
+    refundId = (refundData as Record<string, unknown>).id as string;
 
-    // ─── Insert refund items & optionally restore inventory ──
+    // ─── Insert refund items ─────────────────────────────────
 
     if (refund_items.length > 0) {
       const refundItemsPayload = refund_items.map(ri => ({
@@ -161,44 +226,96 @@ export async function POST(
         quantity: ri.quantity,
         amount: ri.amount,
       }));
-      await adminClient.from('refund_items').insert(refundItemsPayload as Record<string, unknown>[]);
+
+      const { error: riError } = await adminClient
+        .from('refund_items')
+        .insert(refundItemsPayload as Record<string, unknown>[]);
+
+      if (riError) {
+        console.error('refund_items insert failed, rolling back refund:', riError.message);
+        await rollback();
+        return jsonError(`Refund items creation failed: ${riError.message}. Refund was not completed.`, 500);
+      }
+      refundItemsInserted = true;
+
+      // ─── Optionally restore inventory ──────────────────────
 
       if (return_inventory) {
         for (const ri of refund_items) {
-          const { data: saleItem } = await adminClient
-            .from('sale_items')
-            .select('product_id, quantity')
-            .eq('id', ri.sale_item_id)
-            .eq('sale_id', saleId)   // re-scoped to this sale for safety
-            .eq('item_type', 'product')
+          const saleItem = validSaleItems.get(ri.sale_item_id);
+          if (!saleItem || saleItem.item_type !== 'product' || !saleItem.product_id) continue;
+
+          const { data: inv } = await adminClient
+            .from('inventory')
+            .select('id, quantity')
+            .eq('product_id', saleItem.product_id as string)
+            .eq('branch_id', sale.branch_id as string)
             .single();
 
-          if (saleItem) {
-            const siRecord = saleItem as Record<string, unknown>;
-            const { data: inv } = await adminClient
-              .from('inventory')
-              .select('id, quantity')
-              .eq('product_id', siRecord.product_id as string)
-              .eq('branch_id', sale.branch_id as string)
-              .single();
+          if (!inv) continue;
 
-            if (inv) {
-              const invRecord = inv as Record<string, unknown>;
-              const newQty = (invRecord.quantity as number) + ri.quantity;
-              await adminClient.from('inventory')
-                .update({ quantity: newQty } as Record<string, unknown>)
-                .eq('id', invRecord.id as string);
+          const invRecord = inv as Record<string, unknown>;
+          const oldQty = invRecord.quantity as number;
+          const newQty = oldQty + ri.quantity;
 
-              await adminClient.from('stock_adjustments').insert({
-                inventory_id: invRecord.id as string,
-                branch_id: sale.branch_id as string,
-                user_id: currentUser.id,
-                adjustment_type: 'refund',
-                quantity_change: ri.quantity,
-                reason: `Refund on ${sale.receipt_number as string}`,
-                reference_id: saleId,
-              } as Record<string, unknown>);
-            }
+          // Update inventory
+          const { error: updateErr } = await adminClient.from('inventory')
+            .update({ quantity: newQty } as Record<string, unknown>)
+            .eq('id', invRecord.id as string);
+
+          if (updateErr) {
+            console.error('Inventory restoration failed, rolling back:', updateErr.message);
+            await rollback();
+            return jsonError(
+              `Inventory restoration failed: ${updateErr.message}. Refund rolled back.`,
+              500,
+            );
+          }
+
+          // Record in ledger for potential rollback
+          stockMutations.push({ inventoryId: invRecord.id as string, quantityBefore: oldQty });
+
+          // Legacy stock_adjustments (backward compat)
+          const { error: adjErr } = await adminClient.from('stock_adjustments').insert({
+            inventory_id: invRecord.id as string,
+            branch_id: sale.branch_id as string,
+            user_id: userId,
+            adjustment_type: 'refund',
+            quantity_change: ri.quantity,
+            reason: `Refund on ${sale.receipt_number as string}`,
+            reference_id: saleId,
+          } as Record<string, unknown>);
+
+          if (adjErr) {
+            console.error('stock_adjustments write failed, rolling back:', adjErr.message);
+            await rollback();
+            return jsonError(
+              `Stock adjustment write failed: ${adjErr.message}. Refund rolled back.`,
+              500,
+            );
+          }
+
+          // Canonical inventory_logs
+          const { error: logErr } = await adminClient.from('inventory_logs').insert({
+            inventory_id: invRecord.id as string,
+            product_id: saleItem.product_id as string,
+            branch_id: sale.branch_id as string,
+            performed_by: userId,
+            source: 'refund',
+            quantity_delta: ri.quantity,
+            quantity_before: oldQty,
+            quantity_after: newQty,
+            sale_id: saleId,
+            notes: `Refund inventory restoration — ${sale.receipt_number as string}`,
+          } as Record<string, unknown>);
+
+          if (logErr) {
+            console.error('inventory_logs write failed, rolling back:', logErr.message);
+            await rollback();
+            return jsonError(
+              `Inventory log write failed: ${logErr.message}. Refund rolled back.`,
+              500,
+            );
           }
         }
       }
@@ -210,14 +327,23 @@ export async function POST(
     const isFullRefund = Math.abs(newTotalRefunded - saleTotal) < 0.01;
     const newStatus = isFullRefund ? 'refunded' : 'partial_refund';
 
-    await adminClient
+    const { error: statusErr } = await adminClient
       .from('sales')
       .update({ status: newStatus } as Record<string, unknown>)
       .eq('id', saleId);
 
-    // Audit log
+    if (statusErr) {
+      console.error('Sale status update failed, rolling back:', statusErr.message);
+      await rollback();
+      return jsonError(
+        `Sale status update failed: ${statusErr.message}. Refund rolled back.`,
+        500,
+      );
+    }
+
+    // Audit log (non-critical, outside rollback scope)
     await adminClient.from('audit_logs').insert({
-      user_id: currentUser.id,
+      user_id: userId,
       branch_id: sale.branch_id as string,
       action_type: 'SALE_REFUNDED',
       entity_type: 'sale',
@@ -233,6 +359,6 @@ export async function POST(
 
   } catch (error) {
     console.error('POST /api/sales/[id]/refund error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return jsonError('Internal server error', 500);
   }
 }
