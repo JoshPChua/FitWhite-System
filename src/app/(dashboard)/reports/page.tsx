@@ -324,7 +324,8 @@ export default function ReportsPage() {
     if (!data) return;
     const lines = [
       ['Metric', 'Value'],
-      ['Total Revenue', csvCurrency(data.totalRevenue)],
+      ['Gross Revenue', csvCurrency(data.totalRevenue)],
+      ['Net Revenue (after refunds)', csvCurrency(data.totalRevenue - data.totalRefundAmount)],
       ['Transactions', String(data.totalTransactions)],
       ['Avg Transaction', csvCurrency(data.avgTransactionValue)],
       ['Refunds', String(data.totalRefunds)],
@@ -539,10 +540,10 @@ export default function ReportsPage() {
           ))
         ) : (
           [
-            { label: 'Total Revenue', value: formatCurrency(data?.totalRevenue || 0), sub: `${data?.totalTransactions || 0} transactions`, accent: 'text-emerald-700' },
-            { label: 'Avg. Transaction', value: formatCurrency(data?.avgTransactionValue || 0), sub: 'per sale', accent: 'text-brand-800' },
+            { label: 'Gross Revenue', value: formatCurrency(data?.totalRevenue || 0), sub: `${data?.totalTransactions || 0} transactions`, accent: 'text-emerald-700' },
+            { label: 'Net Revenue', value: formatCurrency((data?.totalRevenue || 0) - (data?.totalRefundAmount || 0)), sub: 'after refunds', accent: 'text-brand-800' },
             { label: 'Total Refunds', value: data?.totalRefunds || 0, sub: formatCurrency(data?.totalRefundAmount || 0) + ' refunded', accent: 'text-rose-600' },
-            { label: 'Active Period', value: filterPeriod === 'all' ? 'All Time' : filterPeriod.toUpperCase(), sub: 'selected range', accent: 'text-brand-600' },
+            { label: 'Avg. Transaction', value: formatCurrency(data?.avgTransactionValue || 0), sub: 'per sale', accent: 'text-brand-600' },
           ].map(({ label, value, sub, accent }) => (
             <div key={label} className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
               <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">{label}</p>
