@@ -114,3 +114,58 @@ body {
   animation: shimmer 1.5s infinite;
   border-radius: 6px;
 }
+
+/* ─── Print Styles ─── */
+
+@media print {
+  /* Hide sidebar, navigation, and interactive controls */
+  aside,
+  nav,
+  [data-sidebar],
+  [data-mobile-menu],
+  header > div > div:last-child, /* branch selector + user menu */
+  button,
+  select,
+  .group,                        /* dropdown menus */
+  [role="dialog"]                /* modals */ {
+    display: none !important;
+  }
+
+  /* Allow table action buttons to stay hidden but keep submit buttons */
+  table button,
+  .no-print {
+    display: none !important;
+  }
+
+  /* Full-width content without sidebar offset */
+  main,
+  [data-main-content] {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  /* Clean backgrounds */
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Remove card shadows for clean printing */
+  .shadow-card,
+  .shadow-dropdown,
+  .shadow-sidebar {
+    box-shadow: none !important;
+  }
+
+  /* Ensure tables are readable */
+  table {
+    font-size: 11px !important;
+    border-collapse: collapse !important;
+  }
+  th, td {
+    border: 1px solid #e5e5e5 !important;
+    padding: 4px 8px !important;
+  }
+}

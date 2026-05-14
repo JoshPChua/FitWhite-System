@@ -350,6 +350,119 @@ export default function ReportsPage() {
     downloadCsv(csv, `report-summary-${filterPeriod}.csv`);
   };
 
+  // ─── NEW: Detailed Daily Sales CSV (per-transaction) ───────
+  const handleExportDailySalesDetail = async () => {
+    const branchFilter = isOwner
+      ? (filterBranch || null)
+      : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
+    const periodDays = filterPeriod === '7d' ? 7 : filterPeriod === '30d' ? 30 : filterPeriod === '90d' ? 90 : null;
+    const dateFrom = periodDays ? new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString() : null;
+
+    let q = supabase
+      .from('sales')
+      .select('id, receipt_number, total, subtotal, discount, status, created_at, branches:branch_id(name), profiles:user_id(first_name, last_name), customers:customer_id(first_name, last_name)')
+      .in('status', ['completed', 'partial_refund'])
+      .order('created_at', { ascending: false });
+    if (branchFilter) q = q.eq('branch_id', branchFilter);
+    if (dateFrom) q = q.gte('created_at', dateFrom);
+    const { data: salesData } = await q;
+    if (!salesData || salesData.length === 0) { alert('No sales data to export'); return; }
+
+    // Fetch payments for these sales
+    const saleIds = (salesData as Record<string, unknown>[]).map(s => s.id as string).slice(0, 1000);
+    const { data: paymentsData } = await supabase.from('payments').select('sale_id, method, amount').in('sale_id', saleIds);
+    const payMap = new Map<string, string>();
+    for (const p of (paymentsData || []) as Record<string, unknown>[]) {
+      const existing = payMap.get(p.sale_id as string) || '';
+      payMap.set(p.sale_id as string, existing ? `${existing}, ${p.method}` : p.method as string);
+    }
+
+    type SaleRow = { receipt: string; customer: string; cashier: string; total: string; discount: string; payment_methods: string; status: string; date: string; branch: string };
+    const rows: SaleRow[] = (salesData as Record<string, unknown>[]).map(s => ({
+      receipt: s.receipt_number as string,
+      customer: s.customers ? `${(s.customers as Record<string, unknown>).first_name} ${(s.customers as Record<string, unknown>).last_name}` : 'Walk-in',
+      cashier: s.profiles ? `${(s.profiles as Record<string, unknown>).first_name} ${(s.profiles as Record<string, unknown>).last_name}` : '',
+      total: csvCurrency(Number(s.total)),
+      discount: csvCurrency(Number(s.discount)),
+      payment_methods: payMap.get(s.id as string) || '',
+      status: s.status as string,
+      date: csvDate(s.created_at as string),
+      branch: (s.branches as Record<string, unknown>)?.name as string || '',
+    }));
+    const columns: CsvColumn<SaleRow>[] = [
+      { header: 'Date', accessor: r => r.date },
+      { header: 'Receipt', accessor: r => r.receipt },
+      { header: 'Customer', accessor: r => r.customer },
+      { header: 'Cashier', accessor: r => r.cashier },
+      { header: 'Total', accessor: r => r.total },
+      { header: 'Discount', accessor: r => r.discount },
+      { header: 'Payment Methods', accessor: r => r.payment_methods },
+      { header: 'Status', accessor: r => r.status },
+      { header: 'Branch', accessor: r => r.branch },
+    ];
+    downloadCsv(toCsv(rows, columns), `daily-sales-detail-${filterPeriod}.csv`);
+  };
+
+  // ─── NEW: Cash Movement CSV ────────────────────────────────
+  const handleExportCashMovements = async () => {
+    const branchFilter = isOwner
+      ? (filterBranch || null)
+      : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
+    const periodDays = filterPeriod === '7d' ? 7 : filterPeriod === '30d' ? 30 : filterPeriod === '90d' ? 90 : null;
+    const dateFrom = periodDays ? new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString() : null;
+
+    let q = supabase
+      .from('cash_movements')
+      .select('*, performer:performed_by(first_name, last_name), shifts:shift_id(opened_at, closed_at, status)')
+      .order('created_at', { ascending: false });
+    if (branchFilter) q = q.eq('branch_id', branchFilter);
+    if (dateFrom) q = q.gte('created_at', dateFrom);
+    const { data: cmData } = await q;
+    if (!cmData || cmData.length === 0) { alert('No cash movements to export'); return; }
+
+    type CmRow = { date: string; type: string; amount: string; description: string; reference: string; performer: string; shift_status: string };
+    const movementLabels: Record<string, string> = { petty_cash_out: 'Petty Cash Out', bank_deposit: 'Bank Deposit', cash_in: 'Cash In', opening_float: 'Opening Float' };
+    const rows: CmRow[] = (cmData as Record<string, unknown>[]).map(m => ({
+      date: csvDate(m.created_at as string),
+      type: movementLabels[m.movement_type as string] || (m.movement_type as string),
+      amount: csvCurrency(Number(m.amount)),
+      description: m.description as string || '',
+      reference: m.reference as string || '',
+      performer: m.performer ? `${(m.performer as Record<string, unknown>).first_name} ${(m.performer as Record<string, unknown>).last_name}` : '',
+      shift_status: m.shifts ? (m.shifts as Record<string, unknown>).status as string : 'No shift',
+    }));
+    const columns: CsvColumn<CmRow>[] = [
+      { header: 'Date', accessor: r => r.date },
+      { header: 'Type', accessor: r => r.type },
+      { header: 'Amount', accessor: r => r.amount },
+      { header: 'Description', accessor: r => r.description },
+      { header: 'Reference', accessor: r => r.reference },
+      { header: 'Performed By', accessor: r => r.performer },
+      { header: 'Shift Status', accessor: r => r.shift_status },
+    ];
+    downloadCsv(toCsv(rows, columns), `cash-movements-${filterPeriod}.csv`);
+  };
+
+  // ─── NEW: Payment Methods Breakdown CSV ────────────────────
+  const handleExportPaymentMethods = () => {
+    if (!data) return;
+    type PayRow = { method: string; amount: string; count: number; pct: string };
+    const total = data.paymentMethodBreakdown.reduce((s, p) => s + p.amount, 0);
+    const rows: PayRow[] = data.paymentMethodBreakdown.map(p => ({
+      method: paymentMethodLabels[p.method] || p.method,
+      amount: csvCurrency(p.amount),
+      count: p.count,
+      pct: total > 0 ? ((p.amount / total) * 100).toFixed(1) + '%' : '0%',
+    }));
+    const columns: CsvColumn<PayRow>[] = [
+      { header: 'Payment Method', accessor: r => r.method },
+      { header: 'Total Amount', accessor: r => r.amount },
+      { header: 'Transaction Count', accessor: r => r.count },
+      { header: '% of Total', accessor: r => r.pct },
+    ];
+    downloadCsv(toCsv(rows, columns), `payment-methods-${filterPeriod}.csv`);
+  };
+
   // ─── Render ─────────────────────────────────────────────
 
   return (
@@ -388,17 +501,28 @@ export default function ReportsPage() {
               className="px-3 py-1.5 rounded-xl border border-brand-200 bg-white text-xs font-medium text-brand-600 hover:bg-brand-50 transition-colors">
               📥 Export CSV ▾
             </button>
-            <div className="absolute right-0 top-full mt-1 bg-white rounded-xl border border-brand-100 shadow-dropdown py-1 min-w-[180px]
+            <div className="absolute right-0 top-full mt-1 bg-white rounded-xl border border-brand-100 shadow-dropdown py-1 min-w-[220px]
                             opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-10">
               <button onClick={handleExportSummary} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
-                Full Summary Report
+                📋 Full Summary Report
               </button>
               <button onClick={handleExportSales} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
-                Daily Revenue Data
+                📈 Daily Revenue Data
+              </button>
+              <button onClick={handleExportDailySalesDetail} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
+                🧾 Daily Sales Report (Detail)
               </button>
               <button onClick={handleExportTopItems} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
-                Top Items Data
+                🏆 Top Items Data
               </button>
+              <button onClick={handleExportPaymentMethods} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
+                💳 Payment Methods Breakdown
+              </button>
+              {ENABLE_SHIFTS && (
+                <button onClick={handleExportCashMovements} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
+                  💰 Cash Movements Report
+                </button>
+              )}
             </div>
           </div>
         </div>

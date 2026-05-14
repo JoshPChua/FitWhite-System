@@ -5,6 +5,8 @@ import { useAuth } from '@/providers/auth-provider';
 import { Badge } from '@/components/ui/badge';
 import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
+import { downloadCsv, toCsv, csvCurrency, csvDate, type CsvColumn } from '@/lib/export-csv';
+import { createClient } from '@/lib/supabase/client';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -243,6 +245,38 @@ export default function ShiftsPage() {
         </div>
         {canManage && (
           <div className="flex gap-2">
+            {/* Export CSV for cash movements */}
+            <button onClick={async () => {
+              const supabase = createClient();
+              const { data: cmData } = await supabase
+                .from('cash_movements')
+                .select('*, performer:performed_by(first_name, last_name)')
+                .eq('branch_id', branchId)
+                .order('created_at', { ascending: false });
+              if (!cmData || cmData.length === 0) { alert('No cash movements to export'); return; }
+              type CmRow = { date: string; type: string; amount: string; description: string; reference: string; performer: string };
+              const mvLabels: Record<string, string> = { petty_cash_out: 'Petty Cash Out', bank_deposit: 'Bank Deposit', cash_in: 'Cash In', opening_float: 'Opening Float' };
+              const rows: CmRow[] = (cmData as Record<string, unknown>[]).map(m => ({
+                date: csvDate(m.created_at as string),
+                type: mvLabels[m.movement_type as string] || (m.movement_type as string),
+                amount: csvCurrency(Number(m.amount)),
+                description: m.description as string || '',
+                reference: m.reference as string || '',
+                performer: m.performer ? `${(m.performer as Record<string, unknown>).first_name} ${(m.performer as Record<string, unknown>).last_name}` : '',
+              }));
+              const columns: CsvColumn<CmRow>[] = [
+                { header: 'Date', accessor: r => r.date },
+                { header: 'Type', accessor: r => r.type },
+                { header: 'Amount', accessor: r => r.amount },
+                { header: 'Description', accessor: r => r.description },
+                { header: 'Reference', accessor: r => r.reference },
+                { header: 'Performed By', accessor: r => r.performer },
+              ];
+              downloadCsv(toCsv(rows, columns), `cash-movements-${new Date().toISOString().split('T')[0]}.csv`);
+            }}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">
+              📥 Export Cash Movements
+            </button>
             {!openShift ? (
               <button onClick={() => { setShowOpenModal(true); setFormError(''); }}
                 className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 text-white text-sm font-medium

@@ -164,7 +164,15 @@ export async function POST(request: NextRequest) {
             .single();
           return { item, record: prod as Record<string, unknown> | null, err: prodErr };
         } else {
-          return { item, record: null, err: new Error('Bundle checkout not yet implemented') };
+          // Bundle
+          const { data: bun, error: bunErr } = await adminClient
+            .from('bundles')
+            .select('id, name, price, is_active, branch_id')
+            .eq('id', item.id)
+            .eq('branch_id', branch_id)
+            .eq('is_active', true)
+            .single();
+          return { item, record: bun as Record<string, unknown> | null, err: bunErr };
         }
       })
     );
@@ -192,6 +200,13 @@ export async function POST(request: NextRequest) {
           unit_price: record.price as number,
           quantity: item.quantity,
           product_id: item.id,
+        });
+      } else if (item.item_type === 'bundle') {
+        verifiedItems.push({
+          item_type: 'bundle', id: item.id,
+          name: record.name as string,
+          unit_price: record.price as number,
+          quantity: item.quantity,
         });
       }
     }

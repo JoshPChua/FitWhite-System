@@ -21,6 +21,10 @@ interface Customer {
   store_credit: number;
   allergies: string | null;
   notes: string | null;
+  source: string;
+  referred_by: string | null;
+  referred_by_name?: string;
+  last_transaction_at: string | null;
   created_at: string;
   updated_at: string;
   visit_count?: number;
@@ -34,6 +38,40 @@ interface CustomerFormData {
   phone: string;
   allergies: string;
   notes: string;
+  source: string;
+  referred_by: string;
+}
+
+type StatusFilter = 'all' | 'active' | 'inactive' | 'new';
+
+interface CustomerSale {
+  id: string;
+  receipt_number: string;
+  total: number;
+  status: string;
+  created_at: string;
+  payments: { method: string; amount: number }[];
+  items: { name: string; quantity: number; total_price: number }[];
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  walk_in: 'Walk-in',
+  ads: 'Ads',
+  referral: 'Referral',
+  online: 'Online / Messenger',
+};
+
+function computeStatus(c: Customer): 'new' | 'active' | 'inactive' {
+  const now = Date.now();
+  const created = new Date(c.created_at).getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (!c.last_transaction_at && now - created < dayMs) return 'new';
+  if (c.last_transaction_at) {
+    const lastTx = new Date(c.last_transaction_at).getTime();
+    if (now - lastTx < 90 * dayMs) return 'active';
+  }
+  if (!c.last_transaction_at && now - created < 90 * dayMs) return 'active';
+  return 'inactive';
 }
 
 interface VisitHistoryEntry {
@@ -53,13 +91,14 @@ export default function CustomersPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [searchText, setSearchText] = useState('');
   const [filterBranch, setFilterBranch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   // Create/Edit modal
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formMode, setFormMode] = useState<'create' | 'edit'>('create');
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [formData, setFormData] = useState<CustomerFormData>({
-    branch_id: '', first_name: '', last_name: '', email: '', phone: '', allergies: '', notes: '',
+    branch_id: '', first_name: '', last_name: '', email: '', phone: '', allergies: '', notes: '', source: 'walk_in', referred_by: '',
   });
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
@@ -80,6 +119,14 @@ export default function CustomersPage() {
   // Delete
   const [deleteTarget, setDeleteTarget] = useState<Customer | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Transaction history
+  const [customerSales, setCustomerSales] = useState<CustomerSale[]>([]);
+  const [isLoadingSales, setIsLoadingSales] = useState(false);
+
+  // Referral customer search
+  const [referralSearch, setReferralSearch] = useState('');
+  const [referralResults, setReferralResults] = useState<Customer[]>([]);
 
   const supabase = createClient();
 
@@ -113,6 +160,9 @@ export default function CustomersPage() {
         store_credit: Number(c.store_credit),
         allergies: c.allergies as string | null,
         notes: c.notes as string | null,
+        source: (c.source as string) || 'walk_in',
+        referred_by: c.referred_by as string | null,
+        last_transaction_at: c.last_transaction_at as string | null,
         created_at: c.created_at as string,
         updated_at: c.updated_at as string,
       })));
@@ -185,11 +235,40 @@ export default function CustomersPage() {
         console.error('Customer packages error:', err);
       }
     }
+
+    // Fetch transaction history (sales)
+    setIsLoadingSales(true);
+    try {
+      const { data: salesData } = await supabase
+        .from('sales')
+        .select('id, receipt_number, total, status, created_at, payments(method, amount), sale_items:sale_items(name, quantity, total_price)')
+        .eq('customer_id', customer.id)
+        .order('created_at', { ascending: false })
+        .limit(50);
+      setCustomerSales((salesData || []).map((s: Record<string, unknown>) => ({
+        id: s.id as string,
+        receipt_number: s.receipt_number as string,
+        total: Number(s.total),
+        status: s.status as string,
+        created_at: s.created_at as string,
+        payments: ((s.payments as Record<string, unknown>[]) || []).map(p => ({ method: p.method as string, amount: Number(p.amount) })),
+        items: ((s.sale_items as Record<string, unknown>[]) || []).map(i => ({ name: i.name as string, quantity: i.quantity as number, total_price: Number(i.total_price) })),
+      })));
+    } catch (err) {
+      console.error('Customer sales error:', err);
+    } finally {
+      setIsLoadingSales(false);
+    }
   };
 
   // ─── Filtering ──────────────────────────────────────────
 
   const filteredCustomers = customers.filter(c => {
+    // Status filter
+    if (statusFilter !== 'all') {
+      const s = computeStatus(c);
+      if (statusFilter !== s) return false;
+    }
     if (!searchText) return true;
     const fullName = `${c.first_name} ${c.last_name}`.toLowerCase();
     return fullName.includes(searchText.toLowerCase()) ||
@@ -204,8 +283,9 @@ export default function CustomersPage() {
     setEditingCustomer(null);
     setFormData({
       branch_id: selectedBranch?.id || '',
-      first_name: '', last_name: '', email: '', phone: '', allergies: '', notes: '',
+      first_name: '', last_name: '', email: '', phone: '', allergies: '', notes: '', source: 'walk_in', referred_by: '',
     });
+    setReferralSearch(''); setReferralResults([]);
     setFormError(''); setFormSuccess('');
     setIsModalOpen(true);
   };
@@ -221,7 +301,10 @@ export default function CustomersPage() {
       phone: c.phone || '',
       allergies: c.allergies || '',
       notes: c.notes || '',
+      source: c.source || 'walk_in',
+      referred_by: c.referred_by || '',
     });
+    setReferralSearch(c.referred_by_name || ''); setReferralResults([]);
     setFormError(''); setFormSuccess('');
     setIsModalOpen(true);
   };
@@ -241,6 +324,8 @@ export default function CustomersPage() {
         phone: formData.phone.trim() || null,
         allergies: formData.allergies.trim() || null,
         notes: formData.notes.trim() || null,
+        source: formData.source,
+        referred_by: formData.source === 'referral' && formData.referred_by ? formData.referred_by : null,
       };
 
       if (formMode === 'create') {
@@ -334,25 +419,43 @@ export default function CustomersPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
-          <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">Total Patients</p>
+          <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">Total</p>
           <p className="text-2xl font-semibold text-brand-900 mt-1">{customers.length}</p>
         </div>
         <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
-          <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">With Email</p>
-          <p className="text-2xl font-semibold text-brand-900 mt-1">{customers.filter(c => c.email).length}</p>
+          <p className="text-xs font-medium text-blue-400 uppercase tracking-wide">New Today</p>
+          <p className="text-2xl font-semibold text-blue-700 mt-1">{customers.filter(c => computeStatus(c) === 'new').length}</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
+          <p className="text-xs font-medium text-emerald-400 uppercase tracking-wide">Active</p>
+          <p className="text-2xl font-semibold text-emerald-700 mt-1">{customers.filter(c => computeStatus(c) === 'active').length}</p>
+        </div>
+        <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
+          <p className="text-xs font-medium text-rose-400 uppercase tracking-wide">Inactive</p>
+          <p className="text-2xl font-semibold text-rose-600 mt-1">{customers.filter(c => computeStatus(c) === 'inactive').length}</p>
         </div>
         <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
           <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">Store Credits</p>
-          <p className="text-2xl font-semibold text-brand-900 mt-1">
-            {customers.filter(c => c.store_credit > 0).length}
-          </p>
+          <p className="text-2xl font-semibold text-brand-900 mt-1">{customers.filter(c => c.store_credit > 0).length}</p>
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card p-5">
+      {/* Status Tabs + Filters */}
+      <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card p-5 space-y-3">
+        <div className="flex gap-2 flex-wrap">
+          {(['all', 'active', 'inactive', 'new'] as StatusFilter[]).map(tab => (
+            <button key={tab} onClick={() => setStatusFilter(tab)}
+              className={`px-3.5 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                statusFilter === tab
+                  ? tab === 'inactive' ? 'bg-rose-600 text-white' : tab === 'new' ? 'bg-blue-600 text-white' : tab === 'active' ? 'bg-emerald-600 text-white' : 'bg-brand-600 text-white'
+                  : 'bg-surface-50 text-brand-500 border border-brand-200 hover:border-brand-400'
+              }`}>
+              {tab === 'all' ? 'All' : tab === 'new' ? 'New Today' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div className="md:col-span-2">
             <label className="block text-xs font-medium text-brand-500 mb-1">Search Patients</label>
@@ -386,10 +489,11 @@ export default function CustomersPage() {
             <thead>
               <tr className="border-b border-brand-100/60 bg-surface-50">
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Patient</th>
+                <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Status</th>
+                <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Source</th>
                 {isOwner && !IMUS_ONLY && <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Branch</th>}
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Contact</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Allergies</th>
-                <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Credits</th>
                 <th className="text-left text-xs font-medium text-brand-400 px-5 py-3">Registered</th>
                 <th className="text-right text-xs font-medium text-brand-400 px-5 py-3">Actions</th>
               </tr>
@@ -409,7 +513,7 @@ export default function CustomersPage() {
                 ))
               ) : filteredCustomers.length === 0 ? (
                 <tr>
-                  <td colSpan={isOwner && !IMUS_ONLY ? 7 : 6} className="text-center py-16 text-sm text-brand-400">
+                  <td colSpan={isOwner && !IMUS_ONLY ? 8 : 7} className="text-center py-16 text-sm text-brand-400">
                     <svg className="w-12 h-12 text-brand-200 mx-auto mb-3" fill="none" viewBox="0 0 24 24" strokeWidth={1} stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
                     </svg>
@@ -417,7 +521,9 @@ export default function CustomersPage() {
                   </td>
                 </tr>
               ) : (
-                filteredCustomers.map(c => (
+                filteredCustomers.map(c => {
+                  const status = computeStatus(c);
+                  return (
                   <tr key={c.id} className="border-b border-brand-100/30 hover:bg-brand-50/30 transition-colors">
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-3">
@@ -428,6 +534,14 @@ export default function CustomersPage() {
                           <p className="text-sm font-medium text-brand-800">{c.first_name} {c.last_name}</p>
                         </div>
                       </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <Badge variant={status === 'active' ? 'success' : status === 'new' ? 'brand' : 'danger'} size="sm">
+                        {status === 'new' ? 'New' : status === 'active' ? 'Active' : 'Inactive'}
+                      </Badge>
+                    </td>
+                    <td className="px-5 py-4">
+                      <span className="text-xs text-brand-500">{SOURCE_LABELS[c.source] || c.source}</span>
                     </td>
                     {isOwner && !IMUS_ONLY && <td className="px-5 py-4"><span className="text-sm text-brand-500">{c.branch_name}</span></td>}
                     <td className="px-5 py-4">
@@ -442,13 +556,6 @@ export default function CustomersPage() {
                         <span className="text-xs text-rose-600 bg-rose-50 px-2 py-0.5 rounded-full">{c.allergies}</span>
                       ) : (
                         <span className="text-xs text-brand-300">None</span>
-                      )}
-                    </td>
-                    <td className="px-5 py-4">
-                      {c.store_credit > 0 ? (
-                        <Badge variant="success" size="sm">{formatCurrency(c.store_credit)}</Badge>
-                      ) : (
-                        <span className="text-xs text-brand-300">—</span>
                       )}
                     </td>
                     <td className="px-5 py-4">
@@ -494,7 +601,8 @@ export default function CustomersPage() {
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -602,6 +710,59 @@ export default function CustomersPage() {
                          focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all resize-none" />
           </div>
 
+          {/* Source */}
+          <div>
+            <label className="block text-sm font-medium text-brand-800 mb-1.5">How did this patient find us?</label>
+            <select value={formData.source} onChange={e => setFormData({ ...formData, source: e.target.value, referred_by: e.target.value !== 'referral' ? '' : formData.referred_by })}
+              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
+                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all">
+              <option value="walk_in">Walk-in</option>
+              <option value="ads">Ads (Facebook, Instagram, etc.)</option>
+              <option value="referral">Referral</option>
+              <option value="online">Online / Messenger</option>
+            </select>
+          </div>
+
+          {/* Referral search (conditional) */}
+          {formData.source === 'referral' && (
+            <div>
+              <label className="block text-sm font-medium text-brand-800 mb-1.5">Referred By</label>
+              <input type="text" value={referralSearch}
+                onChange={e => {
+                  setReferralSearch(e.target.value);
+                  if (e.target.value.length >= 2) {
+                    const q = e.target.value.toLowerCase();
+                    setReferralResults(customers.filter(c => 
+                      `${c.first_name} ${c.last_name}`.toLowerCase().includes(q) &&
+                      c.id !== editingCustomer?.id
+                    ).slice(0, 5));
+                  } else {
+                    setReferralResults([]);
+                  }
+                }}
+                placeholder="Search existing patient..."
+                className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900 placeholder:text-brand-300
+                           focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all" />
+              {referralResults.length > 0 && (
+                <div className="mt-1 bg-white rounded-xl border border-brand-100 shadow-dropdown max-h-40 overflow-y-auto">
+                  {referralResults.map(r => (
+                    <button key={r.id} type="button" onClick={() => {
+                      setFormData({ ...formData, referred_by: r.id });
+                      setReferralSearch(`${r.first_name} ${r.last_name}`);
+                      setReferralResults([]);
+                    }}
+                      className="w-full text-left px-4 py-2 text-sm text-brand-700 hover:bg-brand-50 transition-colors">
+                      {r.first_name} {r.last_name} {r.phone ? `· ${r.phone}` : ''}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {formData.referred_by && (
+                <p className="text-xs text-emerald-600 mt-1">✓ Referrer selected: {referralSearch}</p>
+              )}
+            </div>
+          )}
+
           <div className="flex items-center gap-3 pt-2">
             <button
               type="submit" disabled={isSubmitting}
@@ -638,10 +799,36 @@ export default function CustomersPage() {
           <div className="space-y-5">
             {/* Profile info */}
             <div className="grid grid-cols-2 gap-4 bg-surface-50 rounded-xl p-4">
-              <div><p className="text-xs text-brand-400 mb-0.5">Phone</p><p className="text-sm text-brand-800">{detailCustomer.phone || '—'}</p></div>
-              <div><p className="text-xs text-brand-400 mb-0.5">Email</p><p className="text-sm text-brand-800">{detailCustomer.email || '—'}</p></div>
+              <div>
+                <p className="text-xs text-brand-400 mb-0.5">Status</p>
+                {(() => { const s = computeStatus(detailCustomer); return (
+                  <Badge variant={s === 'active' ? 'success' : s === 'new' ? 'brand' : 'danger'} size="sm">
+                    {s === 'new' ? 'New' : s === 'active' ? 'Active' : 'Inactive'}
+                  </Badge>
+                ); })()}
+              </div>
+              <div>
+                <p className="text-xs text-brand-400 mb-0.5">Source</p>
+                <p className="text-sm text-brand-800">{SOURCE_LABELS[detailCustomer.source] || detailCustomer.source}</p>
+              </div>
+              <div><p className="text-xs text-brand-400 mb-0.5">Phone</p>
+                {detailCustomer.phone ? (
+                  <a href={`tel:${detailCustomer.phone}`} className="text-sm text-brand-800 hover:text-brand-600 underline">{detailCustomer.phone}</a>
+                ) : <p className="text-sm text-brand-800">—</p>}
+              </div>
+              <div><p className="text-xs text-brand-400 mb-0.5">Email</p>
+                {detailCustomer.email ? (
+                  <a href={`mailto:${detailCustomer.email}`} className="text-sm text-brand-800 hover:text-brand-600 underline">{detailCustomer.email}</a>
+                ) : <p className="text-sm text-brand-800">—</p>}
+              </div>
               <div><p className="text-xs text-brand-400 mb-0.5">Branch</p><p className="text-sm text-brand-800">{detailCustomer.branch_name}</p></div>
               <div><p className="text-xs text-brand-400 mb-0.5">Store Credit</p><p className="text-sm font-semibold text-emerald-700">{formatCurrency(detailCustomer.store_credit)}</p></div>
+              {detailCustomer.referred_by_name && (
+                <div><p className="text-xs text-brand-400 mb-0.5">Referred By</p><p className="text-sm text-brand-800">{detailCustomer.referred_by_name}</p></div>
+              )}
+              {detailCustomer.last_transaction_at && (
+                <div><p className="text-xs text-brand-400 mb-0.5">Last Transaction</p><p className="text-sm text-brand-800">{formatDate(detailCustomer.last_transaction_at)}</p></div>
+              )}
               {detailCustomer.allergies && (
                 <div className="col-span-2">
                   <p className="text-xs text-brand-400 mb-0.5">Allergies / Contraindications</p>
@@ -739,6 +926,51 @@ export default function CustomersPage() {
                         </div>
                         <span className="text-xs text-brand-400 whitespace-nowrap flex-shrink-0">{formatDateTime(visit.created_at)}</span>
                       </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* ─── Transaction History ─────────────────────── */}
+            <div>
+              <h3 className="text-sm font-semibold text-brand-800 mb-3">Transaction History</h3>
+              {isLoadingSales ? (
+                <div className="space-y-2">
+                  {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-14 w-full rounded-xl" />)}
+                </div>
+              ) : customerSales.length === 0 ? (
+                <div className="text-center py-6 text-sm text-brand-400">
+                  No transactions recorded yet
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {customerSales.map(sale => (
+                    <div key={sale.id} className="bg-surface-50 rounded-xl p-3.5 border border-brand-100/50">
+                      <div className="flex items-center justify-between gap-3 mb-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-brand-600">{sale.receipt_number}</span>
+                          <Badge variant={sale.status === 'completed' ? 'success' : sale.status === 'voided' ? 'default' : 'warning'} size="sm">
+                            {sale.status.replace('_', ' ')}
+                          </Badge>
+                        </div>
+                        <span className="text-sm font-semibold text-brand-800">{formatCurrency(sale.total)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-brand-400">
+                        <span>{formatDateTime(sale.created_at)}</span>
+                        <div className="flex items-center gap-1">
+                          {sale.payments.map((p, i) => (
+                            <span key={i} className="px-1.5 py-0.5 rounded bg-brand-100 text-brand-600 text-[10px] uppercase font-medium">
+                              {p.method === 'bank_transfer' ? 'Bank' : p.method}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      {sale.items.length > 0 && (
+                        <div className="mt-1.5 text-xs text-brand-500">
+                          {sale.items.map(i => `${i.name} ×${i.quantity}`).join(', ')}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>

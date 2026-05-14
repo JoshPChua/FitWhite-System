@@ -8,9 +8,9 @@ import { ENABLE_DOCTOR_COMMISSIONS, ENABLE_SERVICE_BOM, IMUS_ONLY, IMUS_BRANCH_C
 
 // ─── Types ───────────────────────────────────────────────────
 
-type ItemType = 'service' | 'product';
+type ItemType = 'service' | 'product' | 'bundle';
 type PaymentMethod = 'cash' | 'gcash' | 'card' | 'bank_transfer';
-type POSTab = 'services' | 'products';
+type POSTab = 'services' | 'products' | 'bundles';
 
 interface CatalogItem {
   id: string;
@@ -177,6 +177,22 @@ export default function POSPage() {
           description: p.description as string | null,
           is_active: p.is_active as boolean,
           stock: ((p.inventory as Record<string, unknown>[])?.[0]?.quantity ?? 0) as number,
+        })));
+      } else if (activeTab === 'bundles') {
+        const { data } = await supabase
+          .from('bundles')
+          .select('id, name, price, description, is_active')
+          .eq('branch_id', posBranch.id)
+          .eq('is_active', true)
+          .order('name');
+        setCatalog((data || []).map((b: Record<string, unknown>) => ({
+          id: b.id as string,
+          item_type: 'bundle' as ItemType,
+          name: b.name as string,
+          price: Number(b.price),
+          category: null,
+          description: b.description as string | null,
+          is_active: b.is_active as boolean,
         })));
       }
     } finally {
@@ -437,7 +453,7 @@ export default function POSPage() {
     .map(i => i.category)
     .filter(Boolean))] as string[];
 
-  const TAB_LABELS: Record<POSTab, string> = { services: 'Services', products: 'Products' };
+  const TAB_LABELS: Record<POSTab, string> = { services: 'Services', products: 'Products', bundles: 'Bundles' };
 
   // ─── Render ──────────────────────────────────────────────
 
@@ -451,7 +467,7 @@ export default function POSPage() {
         <div className="flex items-center justify-between gap-3 flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className="flex rounded-xl border border-brand-200 bg-white overflow-hidden shadow-sm">
-              {(['services', 'products'] as POSTab[]).map(tab => (
+              {(['services', 'products', 'bundles'] as POSTab[]).map(tab => (
                 <button key={tab} onClick={() => setActiveTab(tab)}
                   className={`px-4 py-2 text-sm font-medium transition-colors ${
                     activeTab === tab
@@ -545,9 +561,10 @@ export default function POSPage() {
                     {/* Item type tag */}
                     <span className={`absolute top-3 right-3 text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full ${
                       item.item_type === 'service' ? 'bg-brand-100 text-brand-600' :
+                      item.item_type === 'bundle' ? 'bg-purple-100 text-purple-700' :
                       'bg-amber-100 text-amber-700'
                     }`}>
-                      {item.item_type}
+                      {item.item_type === 'bundle' ? '📦 Bundle' : item.item_type}
                     </span>
 
                     <p className="text-sm font-semibold text-brand-800 pr-14 leading-tight line-clamp-2 mb-2">{item.name}</p>

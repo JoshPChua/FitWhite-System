@@ -43,6 +43,8 @@ export async function POST(request: NextRequest) {
       phone = null,
       allergies = null,
       notes = null,
+      source = 'walk_in',
+      referred_by = null,
     } = body as {
       branch_id?: string;
       first_name: string;
@@ -51,6 +53,8 @@ export async function POST(request: NextRequest) {
       phone?: string | null;
       allergies?: string | null;
       notes?: string | null;
+      source?: string;
+      referred_by?: string | null;
     };
 
     // Validate required fields
@@ -118,6 +122,8 @@ export async function POST(request: NextRequest) {
         phone: phone?.trim() || null,
         allergies: allergies?.trim() || null,
         notes: notes?.trim() || null,
+        source: source || 'walk_in',
+        referred_by: referred_by || null,
       } as Record<string, unknown>)
       .select('id, first_name, last_name')
       .single();

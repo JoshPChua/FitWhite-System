@@ -8,6 +8,7 @@ import { Modal } from '@/components/ui/modal';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { SaleStatus } from '@/types/database';
 import { IMUS_ONLY } from '@/lib/feature-flags';
+import { downloadCsv, toCsv, csvCurrency, csvDate, type CsvColumn } from '@/lib/export-csv';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -295,8 +296,41 @@ export default function SalesPage() {
           <p className="text-2xl font-semibold text-brand-900 mt-1">{filteredSales.filter(s => s.status === 'completed').length}</p>
         </div>
         <div className="bg-white rounded-2xl border border-brand-100/50 shadow-card px-5 py-4">
-          <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">Refunded</p>
-          <p className="text-2xl font-semibold text-rose-600 mt-1">{filteredSales.filter(s => s.status === 'refunded' || s.status === 'partial_refund').length}</p>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-medium text-brand-400 uppercase tracking-wide">Refunded</p>
+              <p className="text-2xl font-semibold text-rose-600 mt-1">{filteredSales.filter(s => s.status === 'refunded' || s.status === 'partial_refund').length}</p>
+            </div>
+            <button onClick={() => {
+              if (filteredSales.length === 0) { alert('No sales data to export'); return; }
+              type Row = { receipt: string; customer: string; cashier: string; total: string; status: string; date: string; branch: string };
+              const rows: Row[] = filteredSales.map(s => ({
+                receipt: s.receipt_number,
+                customer: s.customer_name || 'Walk-in',
+                cashier: s.cashier_name,
+                total: csvCurrency(s.total),
+                status: STATUS_LABELS[s.status],
+                date: csvDate(s.created_at),
+                branch: s.branch_name,
+              }));
+              const columns: CsvColumn<Row>[] = [
+                { header: 'Date', accessor: r => r.date },
+                { header: 'Receipt', accessor: r => r.receipt },
+                { header: 'Customer', accessor: r => r.customer },
+                { header: 'Cashier', accessor: r => r.cashier },
+                { header: 'Total', accessor: r => r.total },
+                { header: 'Status', accessor: r => r.status },
+                { header: 'Branch', accessor: r => r.branch },
+              ];
+              downloadCsv(toCsv(rows, columns), `sales-history-${new Date().toISOString().split('T')[0]}.csv`);
+            }}
+              title="Export current view as CSV"
+              className="p-2 rounded-lg border border-brand-200 text-brand-500 hover:bg-brand-50 hover:text-brand-700 transition-colors">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 

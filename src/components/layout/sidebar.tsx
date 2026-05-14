@@ -60,16 +60,18 @@ function isGroup(entry: NavEntry): entry is NavGroup {
 /**
  * Role-aware navigation builder.
  *
- * Owner sees the full structure including Dashboard and Admin.
- * Non-owner (manager/cashier — same role in the current auth model)
- * sees the full operational toolset minus Dashboard and Admin > Users.
+ * Owner  → full structure including Dashboard and Admin.
+ * Manager → Dashboard + operational toolset (no Admin > Users).
+ * Cashier → operational toolset only (no Dashboard, no Admin).
  */
 function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
   const isOwner = role === 'owner';
   const nav: NavEntry[] = [];
 
-  // ─── Top-level items ──────────────────────────────────
-  if (isOwner) {
+  // ─── Dashboard (always visible for owner + manager) ───
+  // NOTE: This must be the first entry so it's always rendered
+  // at the top of the sidebar for managers returning to dashboard.
+  if (isOwner || role === 'manager') {
     nav.push({ href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard });
   }
   nav.push({ href: '/pos', label: 'POS', icon: ShoppingCart });
@@ -142,7 +144,14 @@ export function Sidebar() {
   const router = useRouter();
   const { profile, isOwner, isManager, signOut } = useAuth();
 
-  const role = isOwner ? 'owner' : isManager ? 'manager' : 'cashier';
+  // Use profile.role as authoritative source — the isOwner/isManager booleans
+  // can lag behind profile resolution and cause the Dashboard link to disappear.
+  const role: 'owner' | 'manager' | 'cashier' =
+    profile?.role === 'owner' ? 'owner'
+    : profile?.role === 'manager' ? 'manager'
+    : isOwner ? 'owner'
+    : isManager ? 'manager'
+    : 'cashier';
   const nav = buildNav(role);
 
   // Collapsed groups — auto-expand if a child is active
@@ -289,7 +298,7 @@ export function Sidebar() {
     <>
       {/* Brand Header */}
       <div className="px-4 py-3.5 border-b border-brand-100/50 flex items-center justify-between">
-        <Link href={role === 'owner' ? '/dashboard' : '/pos'} className="flex items-center gap-2.5">
+        <Link href={role === 'owner' || role === 'manager' ? '/dashboard' : '/pos'} className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm">
             <span className="text-xs font-bold text-white font-display">FW</span>
           </div>

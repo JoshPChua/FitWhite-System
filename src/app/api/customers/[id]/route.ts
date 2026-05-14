@@ -60,6 +60,8 @@ export async function PATCH(
     if (body.phone !== undefined) updateData.phone = body.phone?.trim() || null;
     if (body.allergies !== undefined) updateData.allergies = body.allergies?.trim() || null;
     if (body.notes !== undefined) updateData.notes = body.notes?.trim() || null;
+    if (body.source !== undefined) updateData.source = body.source;
+    if (body.referred_by !== undefined) updateData.referred_by = body.referred_by || null;
 
     // Prevent branch reassignment in IMUS_ONLY
     if (body.branch_id !== undefined && !IMUS_ONLY) {
