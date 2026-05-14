@@ -1,12 +1,8 @@
 -- Migration: 011_auditor_role.sql
 -- Adds the auditor role, PIN field, and approval tracking columns
 
--- 1. Extend role constraint to include 'auditor'
-ALTER TABLE profiles
-  DROP CONSTRAINT IF EXISTS profiles_role_check;
-ALTER TABLE profiles
-  ADD CONSTRAINT profiles_role_check
-  CHECK (role IN ('owner', 'manager', 'cashier', 'auditor'));
+-- 1. Add 'auditor' to the user_role enum type
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'auditor';
 
 -- 2. Auditor PIN (hashed, only used for auditor accounts)
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS auditor_pin TEXT DEFAULT NULL;
