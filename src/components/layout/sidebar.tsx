@@ -60,20 +60,39 @@ function isGroup(entry: NavEntry): entry is NavGroup {
 /**
  * Role-aware navigation builder.
  *
- * Owner  → full structure including Dashboard and Admin.
+ * Owner   → full structure including Dashboard and Admin.
  * Manager → Dashboard + operational toolset (no Admin > Users).
+ * Auditor → Dashboard + Finance (Sales, Reports, Commissions) + Audit Logs + Customers (view-only).
  * Cashier → operational toolset only (no Dashboard, no Admin).
  */
-function buildNav(role: 'owner' | 'manager' | 'cashier'): NavEntry[] {
+function buildNav(role: 'owner' | 'manager' | 'cashier' | 'auditor'): NavEntry[] {
   const isOwner = role === 'owner';
+  const isAuditor = role === 'auditor';
   const nav: NavEntry[] = [];
 
-  // ─── Dashboard (always visible for owner + manager) ───
-  // NOTE: This must be the first entry so it's always rendered
-  // at the top of the sidebar for managers returning to dashboard.
-  if (isOwner || role === 'manager') {
+  // ─── Dashboard (owner, manager, auditor) ──────────────
+  if (isOwner || role === 'manager' || isAuditor) {
     nav.push({ href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard });
   }
+
+  // ─── Auditor: limited nav (reports/finance + audit only) ───
+  if (isAuditor) {
+    nav.push({ href: '/customers', label: 'Customers', icon: Users });
+
+    const financeItems: NavItem[] = [
+      { href: '/sales', label: 'Sales', icon: BadgeDollarSign },
+    ];
+    if (ENABLE_DOCTOR_COMMISSIONS) {
+      financeItems.push({ href: '/commissions', label: 'Commissions', icon: Wallet });
+    }
+    financeItems.push({ href: '/reports', label: 'Reports', icon: BarChart3 });
+    nav.push({ id: 'finance', label: 'Finance', icon: BadgeDollarSign, items: financeItems });
+
+    nav.push({ href: '/audit-logs', label: 'Audit Logs', icon: FileText });
+    return nav;
+  }
+
+  // ─── Non-auditor roles below ──────────────────────────
   nav.push({ href: '/pos', label: 'POS', icon: ShoppingCart });
   nav.push({ href: '/customers', label: 'Customers', icon: Users });
 
@@ -146,9 +165,10 @@ export function Sidebar() {
 
   // Use profile.role as authoritative source — the isOwner/isManager booleans
   // can lag behind profile resolution and cause the Dashboard link to disappear.
-  const role: 'owner' | 'manager' | 'cashier' =
+  const role: 'owner' | 'manager' | 'cashier' | 'auditor' =
     profile?.role === 'owner' ? 'owner'
     : profile?.role === 'manager' ? 'manager'
+    : profile?.role === 'auditor' ? 'auditor'
     : isOwner ? 'owner'
     : isManager ? 'manager'
     : 'cashier';

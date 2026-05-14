@@ -16,6 +16,7 @@ interface AuthContextType {
   isOwner: boolean;
   isManager: boolean;
   isCashier: boolean;
+  isAuditor: boolean;
   role: UserRole | null;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -166,6 +167,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isOwner:   role === 'owner',
         isManager: role === 'manager',
         isCashier: role === 'cashier',
+        isAuditor: role === 'auditor',
         role,
         signOut,
         refreshProfile,

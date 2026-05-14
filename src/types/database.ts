@@ -7,7 +7,7 @@
 
 // ─── Enums ──────────────────────────────────────────────────
 
-export type UserRole = 'owner' | 'manager' | 'cashier';
+export type UserRole = 'owner' | 'manager' | 'cashier' | 'auditor';
 export type BranchType = 'owned' | 'managed';
 export type ItemType = 'service' | 'product' | 'bundle';
 export type PaymentMethod = 'cash' | 'gcash' | 'card' | 'bank_transfer';

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { assertImusOnlyBranch, IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
+import { hashPin, isValidPinFormat } from '@/lib/auditor-pin';
 import type { Profile } from '@/types/database';
 
 /**
@@ -38,7 +39,7 @@ export async function PATCH(
     }
 
     const body = await request.json();
-    const { first_name, last_name, role, branch_id, is_active } = body;
+    const { first_name, last_name, role, branch_id, is_active, auditor_pin } = body;
 
     // Managers can only update staff in their branch
     if (callerProfile.role === 'manager') {
@@ -94,8 +95,21 @@ export async function PATCH(
     // Doctor fields (is_doctor, default_commission_rate) are now managed
     // exclusively via the standalone doctors table — not written here.
 
-    if (Object.keys(updateData).length === 0) {
+    if (Object.keys(updateData).length === 0 && !auditor_pin) {
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
+    }
+
+    // Handle auditor PIN reset (owner only)
+    if (auditor_pin) {
+      if (callerProfile.role !== 'owner') {
+        return NextResponse.json({ error: 'Only owners can set/reset auditor PINs' }, { status: 403 });
+      }
+      if (!isValidPinFormat(auditor_pin)) {
+        return NextResponse.json({ error: 'PIN must be exactly 6 digits' }, { status: 400 });
+      }
+      updateData.auditor_pin = await hashPin(auditor_pin);
+      updateData.pin_failed_attempts = 0;
+      updateData.pin_locked_until = null;
     }
 
     const adminClient = createAdminClient();

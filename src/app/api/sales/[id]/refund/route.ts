@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import {
   requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
 } from '@/lib/api-helpers';
+import { verifyPin, isValidPinFormat, MAX_PIN_ATTEMPTS } from '@/lib/auditor-pin';
 import type { Profile } from '@/types/database';
 
 /**
@@ -30,7 +31,7 @@ export async function POST(
     if (isErrorResponse(auth)) return auth;
     const { userId, profile: caller } = auth;
 
-    if (caller.role === 'cashier') {
+    if (caller.role === 'cashier' || caller.role === 'auditor') {
       return jsonError('Forbidden — manager or owner required', 403);
     }
 
@@ -42,6 +43,7 @@ export async function POST(
       notes = '',
       return_inventory = false,
       refund_items = [],
+      auditor_pin,
     } = body as {
       refund_type?: 'product' | 'service' | 'consumed';
       amount: number;
@@ -49,6 +51,7 @@ export async function POST(
       notes?: string;
       return_inventory?: boolean;
       refund_items: Array<{ sale_item_id: string; quantity: number; amount: number }>;
+      auditor_pin?: string;
     };
 
     // ─── Input validation ────────────────────────────────────
@@ -70,6 +73,59 @@ export async function POST(
     }
 
     const adminClient = createAdminClient();
+
+    // ─── Auditor PIN validation (managers only) ──────────
+    let approvedByAuditorId: string | null = null;
+
+    if (caller.role === 'manager') {
+      if (!auditor_pin) {
+        return jsonError('Auditor PIN required for refund approval', 400);
+      }
+      if (!isValidPinFormat(auditor_pin)) {
+        return jsonError('PIN must be exactly 6 digits', 400);
+      }
+
+      const { data: auditors } = await adminClient
+        .from('profiles')
+        .select('id, first_name, last_name, auditor_pin, pin_failed_attempts, pin_locked_until')
+        .eq('role', 'auditor')
+        .eq('is_active', true)
+        .not('auditor_pin', 'is', null);
+
+      if (!auditors || auditors.length === 0) {
+        return jsonError('No auditors configured. Contact the owner.', 400);
+      }
+
+      const now = new Date();
+      let pinValid = false;
+
+      for (const auditor of auditors as Record<string, unknown>[]) {
+        const lockedUntil = auditor.pin_locked_until ? new Date(auditor.pin_locked_until as string) : null;
+        if (lockedUntil && lockedUntil > now) continue;
+
+        const isValid = await verifyPin(auditor_pin, auditor.auditor_pin as string);
+        if (isValid) {
+          approvedByAuditorId = auditor.id as string;
+          pinValid = true;
+          await adminClient.from('profiles')
+            .update({ pin_failed_attempts: 0, pin_locked_until: null } as Record<string, unknown>)
+            .eq('id', auditor.id as string);
+          break;
+        }
+      }
+
+      if (!pinValid) {
+        for (const auditor of auditors as Record<string, unknown>[]) {
+          const failed = ((auditor.pin_failed_attempts as number) || 0) + 1;
+          const update: Record<string, unknown> = { pin_failed_attempts: failed };
+          if (failed >= MAX_PIN_ATTEMPTS) {
+            update.pin_locked_until = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
+          }
+          await adminClient.from('profiles').update(update).eq('id', auditor.id as string);
+        }
+        return jsonError('Invalid auditor PIN', 403);
+      }
+    }
 
     // ─── Imus-only guard ─────────────────────────────────────
 
@@ -210,6 +266,7 @@ export async function POST(
         reason,
         notes: notes || '',
         return_inventory,
+        ...(approvedByAuditorId ? { approved_by: approvedByAuditorId, approved_at: new Date().toISOString() } : {}),
       } as Record<string, unknown>)
       .select('id')
       .single();
@@ -348,10 +405,11 @@ export async function POST(
       action_type: 'SALE_REFUNDED',
       entity_type: 'sale',
       entity_id: saleId,
-      description: `${isFullRefund ? 'Full' : 'Partial'} refund ₱${amount.toFixed(2)} on ${sale.receipt_number as string} — ${reason}`,
+      description: `${isFullRefund ? 'Full' : 'Partial'} refund ₱${amount.toFixed(2)} on ${sale.receipt_number as string} — ${reason}${approvedByAuditorId ? ' (auditor approved)' : ' (owner authority)'}`,
       metadata: {
         refund_id: refundId, amount, reason, return_inventory,
         is_full: isFullRefund, prior_refund_total: priorRefundTotal,
+        approved_by: approvedByAuditorId,
       },
     } as Record<string, unknown>);
 

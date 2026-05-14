@@ -38,11 +38,13 @@ interface UserFormData {
   branch_id: string;
   is_doctor: boolean;
   default_commission_rate: string;
+  auditor_pin: string;
 }
 
-const ROLE_CONFIG: Record<UserRole, { label: string; variant: 'brand' | 'info' | 'default' }> = {
+const ROLE_CONFIG: Record<UserRole, { label: string; variant: 'brand' | 'info' | 'default' | 'warning' }> = {
   owner: { label: 'Owner', variant: 'brand' },
   manager: { label: 'Manager', variant: 'info' },
+  auditor: { label: 'Auditor', variant: 'warning' },
   cashier: { label: 'Cashier', variant: 'default' },
 };
 
@@ -69,6 +71,7 @@ export default function UsersPage() {
     branch_id: '',
     is_doctor: false,
     default_commission_rate: '',
+    auditor_pin: '',
   });
   const [formError, setFormError] = useState('');
   const [formSuccess, setFormSuccess] = useState('');
@@ -160,6 +163,7 @@ export default function UsersPage() {
       branch_id: (IMUS_ONLY || isManager) ? (selectedBranch?.id || '') : '',
       is_doctor: false,
       default_commission_rate: '',
+      auditor_pin: '',
     });
     setFormError('');
     setFormSuccess('');
@@ -178,6 +182,7 @@ export default function UsersPage() {
       branch_id: u.branch_id || '',
       is_doctor: u.is_doctor || false,
       default_commission_rate: u.default_commission_rate != null ? String(u.default_commission_rate) : '',
+      auditor_pin: '',
     });
     setFormError('');
     setFormSuccess('');
@@ -204,8 +209,17 @@ export default function UsersPage() {
         }
 
         // Doctor fields are managed via Clinic → Doctors, not here
-        const { is_doctor: _d, default_commission_rate: _c, ...cleanFormData } = formData;
-        const createPayload = cleanFormData;
+        const { is_doctor: _d, default_commission_rate: _c, auditor_pin: _ap, ...cleanFormData } = formData;
+        const createPayload: Record<string, unknown> = { ...cleanFormData };
+
+        // Include auditor_pin if creating an auditor
+        if (formData.role === 'auditor') {
+          if (!formData.auditor_pin || formData.auditor_pin.length !== 6) {
+            setFormError('Auditor PIN must be exactly 6 digits');
+            return;
+          }
+          createPayload.auditor_pin = formData.auditor_pin;
+        }
 
         const res = await fetch('/api/users', {
           method: 'POST',
@@ -233,6 +247,14 @@ export default function UsersPage() {
         if (formData.last_name !== editingUser.last_name) updates.last_name = formData.last_name;
         if (formData.role !== editingUser.role) updates.role = formData.role;
         if (formData.branch_id !== editingUser.branch_id) updates.branch_id = formData.branch_id;
+
+        // Auditor PIN reset
+        if (formData.auditor_pin && formData.auditor_pin.length === 6) {
+          updates.auditor_pin = formData.auditor_pin;
+        } else if (formData.auditor_pin && formData.auditor_pin.length > 0 && formData.auditor_pin.length < 6) {
+          setFormError('PIN must be exactly 6 digits');
+          return;
+        }
 
         // Doctor fields are managed via Clinic → Doctors (not editable here)
 
@@ -360,7 +382,7 @@ export default function UsersPage() {
   };
 
   // Roles that the current user can assign
-  const assignableRoles: UserRole[] = isOwner ? ['owner', 'manager', 'cashier'] : ['cashier'];
+  const assignableRoles: UserRole[] = isOwner ? ['owner', 'manager', 'auditor', 'cashier'] : ['cashier'];
 
   // Branches the current user can assign to
   const assignableBranches: Branch[] = isOwner ? branches : branches.filter(b => b.id === selectedBranch?.id);
@@ -465,6 +487,7 @@ export default function UsersPage() {
               <option value="">All roles</option>
               <option value="owner">Owner</option>
               <option value="manager">Manager</option>
+              <option value="auditor">Auditor</option>
               <option value="cashier">Cashier</option>
             </select>
           </div>
@@ -771,6 +794,39 @@ export default function UsersPage() {
               </select>
               {isManager && (
                 <p className="text-xs text-brand-400 mt-1">Staff will be assigned to your branch</p>
+              )}
+            </div>
+          )}
+
+          {/* Auditor PIN (only shown when role is 'auditor') */}
+          {formData.role === 'auditor' && (
+            <div className="border border-purple-200 bg-purple-50 rounded-xl p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm">🔐</span>
+                <p className="text-sm font-medium text-purple-800">
+                  {formMode === 'create' ? 'Set Auditor PIN' : 'Reset Auditor PIN'}
+                </p>
+              </div>
+              <p className="text-xs text-purple-600">
+                {formMode === 'create'
+                  ? 'This 6-digit PIN will be required by branch managers when processing voids and refunds.'
+                  : 'Enter a new 6-digit PIN to reset. Leave blank to keep the current PIN.'}
+              </p>
+              <input
+                type="password" inputMode="numeric" maxLength={6}
+                value={formData.auditor_pin}
+                onChange={e => {
+                  const val = e.target.value.replace(/\D/g, '').slice(0, 6);
+                  setFormData({ ...formData, auditor_pin: val });
+                }}
+                placeholder="Enter 6-digit PIN"
+                required={formMode === 'create'}
+                className="w-full px-4 py-3 rounded-xl border border-purple-300 bg-white text-center text-lg tracking-[0.5em] font-mono
+                           text-purple-900 placeholder:text-purple-300 placeholder:tracking-normal placeholder:text-sm placeholder:font-sans
+                           focus:outline-none focus:ring-2 focus:ring-purple-400/50 transition-all"
+              />
+              {formData.auditor_pin.length > 0 && formData.auditor_pin.length < 6 && (
+                <p className="text-xs text-rose-500">PIN must be exactly 6 digits</p>
               )}
             </div>
           )}

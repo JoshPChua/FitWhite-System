@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { assertImusOnlyBranch, IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
+import { hashPin, isValidPinFormat } from '@/lib/auditor-pin';
 import type { Profile, UserRole } from '@/types/database';
 
 /**
@@ -39,6 +40,7 @@ export async function POST(request: NextRequest) {
     const {
       email, password, first_name, last_name, role, branch_id,
       is_doctor = false, default_commission_rate = null,
+      auditor_pin,
     } = body as {
       email: string;
       password: string;
@@ -48,7 +50,18 @@ export async function POST(request: NextRequest) {
       branch_id: string;
       is_doctor?: boolean;
       default_commission_rate?: number | null;
+      auditor_pin?: string;
     };
+
+    // Validate auditor PIN if role is auditor
+    if (role === 'auditor') {
+      if (!auditor_pin || !isValidPinFormat(auditor_pin)) {
+        return NextResponse.json(
+          { error: 'Auditor role requires a 6-digit PIN' },
+          { status: 400 }
+        );
+      }
+    }
 
     // Validate required fields
     if (!email || !password || !first_name || !last_name || !role || !branch_id) {
@@ -118,16 +131,24 @@ export async function POST(request: NextRequest) {
     // Doctor fields (is_doctor, default_commission_rate) are now managed
     // exclusively via the standalone doctors table — not written here.
 
-    // Update the profile with branch and role (trigger creates a basic profile)
+    const profileUpdate: Record<string, unknown> = {
+      first_name,
+      last_name,
+      role,
+      branch_id,
+      is_active: true,
+    };
+
+    // Hash and store auditor PIN if applicable
+    if (role === 'auditor' && auditor_pin) {
+      profileUpdate.auditor_pin = await hashPin(auditor_pin);
+      profileUpdate.pin_failed_attempts = 0;
+      profileUpdate.pin_locked_until = null;
+    }
+
     const { error: profileError } = await adminClient
       .from('profiles')
-      .update({
-        first_name,
-        last_name,
-        role,
-        branch_id,
-        is_active: true,
-      })
+      .update(profileUpdate)
       .eq('id', authData.user.id);
 
     if (profileError) {

@@ -56,7 +56,7 @@ const STATUS_VARIANTS: Record<SaleStatus, 'success' | 'danger' | 'warning' | 'de
 // ─── Component ──────────────────────────────────────────────
 
 export default function SalesPage() {
-  const { isOwner, isManager, selectedBranch, branches } = useAuth();
+  const { isOwner, isManager, isAuditor, selectedBranch, branches } = useAuth();
   const [sales, setSales] = useState<SaleRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchText, setSearchText] = useState('');
@@ -76,6 +76,14 @@ export default function SalesPage() {
   const [voidReason, setVoidReason] = useState('');
   const [isVoiding, setIsVoiding] = useState(false);
   const [voidError, setVoidError] = useState('');
+
+  // Auditor PIN (shared by void/refund)
+  const [auditorPin, setAuditorPin] = useState('');
+  const [pinValidated, setPinValidated] = useState(false);
+  const [pinAuditorName, setPinAuditorName] = useState('');
+  const [pinAuditorId, setPinAuditorId] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [isValidatingPin, setIsValidatingPin] = useState(false);
 
   // Refund modal
   const [showRefund, setShowRefund] = useState(false);
@@ -179,23 +187,53 @@ export default function SalesPage() {
     }
   };
 
-  // ─── Void ──────────────────────────────────────────────────
+  const resetPinState = () => {
+    setAuditorPin(''); setPinValidated(false); setPinAuditorName(''); setPinAuditorId(''); setPinError('');
+  };
+
+  const validateAuditorPin = async (pin: string) => {
+    if (pin.length !== 6) return;
+    setIsValidatingPin(true); setPinError('');
+    try {
+      const res = await fetch('/api/auth/validate-auditor-pin', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+      const data = await res.json();
+      if (data.valid) {
+        setPinValidated(true); setPinAuditorName(data.auditor_name); setPinAuditorId(data.auditor_id);
+      } else {
+        setPinError(data.error || 'Invalid PIN');
+        setAuditorPin('');
+      }
+    } catch {
+      setPinError('Network error');
+    } finally {
+      setIsValidatingPin(false);
+    }
+  };
+
+  // ─── Void ──────────────────────────────────────────────────────
 
   const openVoid = () => {
-    setVoidReason('');
-    setVoidError('');
+    setVoidReason(''); setVoidError(''); resetPinState();
     setShowVoid(true);
   };
 
   const handleVoid = async () => {
     if (!voidReason.trim()) { setVoidError('Please provide a reason for voiding'); return; }
     if (!detailSale) return;
+    // Manager must have PIN validated
+    if (isManager && !pinValidated) { setVoidError('Auditor PIN approval is required'); return; }
     setIsVoiding(true); setVoidError('');
     try {
       const res = await fetch(`/api/sales/${detailSale.id}/void`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: voidReason }),
+        body: JSON.stringify({
+          reason: voidReason,
+          ...(isManager ? { auditor_pin: auditorPin } : {}),
+        }),
       });
       const data = await res.json();
       if (!res.ok) { setVoidError(data.error); return; }
@@ -214,9 +252,8 @@ export default function SalesPage() {
   const openRefund = () => {
     if (!detailSale) return;
     setRefundAmount(detailSale.total.toFixed(2));
-    setRefundReason('');
-    setRefundReturnInv(false);
-    setRefundError('');
+    setRefundReason(''); setRefundReturnInv(false); setRefundError('');
+    resetPinState();
     setShowRefund(true);
   };
 
@@ -226,6 +263,7 @@ export default function SalesPage() {
     if (isNaN(amount) || amount <= 0) { setRefundError('Enter a valid refund amount'); return; }
     if (!refundReason.trim()) { setRefundError('Please provide a refund reason'); return; }
     if (amount > detailSale.total) { setRefundError(`Amount cannot exceed total ₱${detailSale.total.toFixed(2)}`); return; }
+    if (isManager && !pinValidated) { setRefundError('Auditor PIN approval is required'); return; }
     setIsRefunding(true); setRefundError('');
     try {
       const res = await fetch(`/api/sales/${detailSale.id}/refund`, {
@@ -236,6 +274,7 @@ export default function SalesPage() {
           reason: refundReason,
           return_inventory: refundReturnInv,
           refund_type: 'product',
+          ...(isManager ? { auditor_pin: auditorPin } : {}),
         }),
       });
       const data = await res.json();
@@ -563,8 +602,8 @@ export default function SalesPage() {
               </div>
             )}
 
-            {/* ─ Void / Refund Actions (manager+) ─ */}
-            {(isOwner || isManager) && detailSale && (
+            {/* ─ Void / Refund Actions (manager/owner only, NOT auditor) ─ */}
+            {(isOwner || isManager) && !isAuditor && detailSale && (
               <div className="flex gap-2 pt-1">
                 {(detailSale.status === 'completed' || detailSale.status === 'partial_refund') && (
                   <button onClick={openRefund}
@@ -619,8 +658,48 @@ export default function SalesPage() {
             />
           </div>
 
+          {/* ─ Auditor PIN (managers only) ─ */}
+          {isManager && (
+            <div className="border border-purple-200 bg-purple-50 rounded-xl p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm">🔐</span>
+                <p className="text-sm font-medium text-purple-800">Auditor Approval Required</p>
+              </div>
+              {pinValidated ? (
+                <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                  <span className="text-emerald-600">✓</span>
+                  <span className="text-sm text-emerald-800 font-medium">Approved by {pinAuditorName}</span>
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-purple-600">Enter the 6-digit auditor PIN to authorize this void.</p>
+                  <input
+                    type="password" inputMode="numeric" maxLength={6}
+                    value={auditorPin}
+                    onChange={e => {
+                      const val = e.target.value.replace(/\D/g, '').slice(0, 6);
+                      setAuditorPin(val);
+                      if (val.length === 6) validateAuditorPin(val);
+                    }}
+                    placeholder="● ● ● ● ● ●"
+                    className="w-full px-4 py-3 rounded-xl border border-purple-300 bg-white text-center text-lg tracking-[0.5em] font-mono
+                               text-purple-900 placeholder:text-purple-300 placeholder:tracking-[0.3em]
+                               focus:outline-none focus:ring-2 focus:ring-purple-400/50 transition-all"
+                    disabled={isValidatingPin}
+                  />
+                  {isValidatingPin && (
+                    <p className="text-xs text-purple-500 text-center">Validating...</p>
+                  )}
+                  {pinError && (
+                    <p className="text-xs text-rose-600 font-medium">{pinError}</p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-3">
-            <button onClick={handleVoid} disabled={isVoiding}
+            <button onClick={handleVoid} disabled={isVoiding || (isManager && !pinValidated)}
               className="flex-1 py-2.5 px-4 rounded-xl bg-rose-600 text-white text-sm font-medium hover:bg-rose-700 active:scale-[0.98]
                          disabled:opacity-60 disabled:cursor-not-allowed transition-all">
               {isVoiding ? 'Voiding...' : 'Confirm Void'}
@@ -696,8 +775,48 @@ export default function SalesPage() {
             </div>
           </label>
 
+          {/* ─ Auditor PIN (managers only) ─ */}
+          {isManager && (
+            <div className="border border-purple-200 bg-purple-50 rounded-xl p-4 space-y-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm">🔐</span>
+                <p className="text-sm font-medium text-purple-800">Auditor Approval Required</p>
+              </div>
+              {pinValidated ? (
+                <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                  <span className="text-emerald-600">✓</span>
+                  <span className="text-sm text-emerald-800 font-medium">Approved by {pinAuditorName}</span>
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-purple-600">Enter the 6-digit auditor PIN to authorize this refund.</p>
+                  <input
+                    type="password" inputMode="numeric" maxLength={6}
+                    value={auditorPin}
+                    onChange={e => {
+                      const val = e.target.value.replace(/\D/g, '').slice(0, 6);
+                      setAuditorPin(val);
+                      if (val.length === 6) validateAuditorPin(val);
+                    }}
+                    placeholder="● ● ● ● ● ●"
+                    className="w-full px-4 py-3 rounded-xl border border-purple-300 bg-white text-center text-lg tracking-[0.5em] font-mono
+                               text-purple-900 placeholder:text-purple-300 placeholder:tracking-[0.3em]
+                               focus:outline-none focus:ring-2 focus:ring-purple-400/50 transition-all"
+                    disabled={isValidatingPin}
+                  />
+                  {isValidatingPin && (
+                    <p className="text-xs text-purple-500 text-center">Validating...</p>
+                  )}
+                  {pinError && (
+                    <p className="text-xs text-rose-600 font-medium">{pinError}</p>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-3">
-            <button onClick={handleRefund} disabled={isRefunding}
+            <button onClick={handleRefund} disabled={isRefunding || (isManager && !pinValidated)}
               className="flex-1 py-2.5 px-4 rounded-xl bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 active:scale-[0.98]
                          disabled:opacity-60 disabled:cursor-not-allowed transition-all">
               {isRefunding ? 'Processing...' : 'Confirm Refund'}

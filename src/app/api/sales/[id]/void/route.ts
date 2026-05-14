@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { verifyPin, isValidPinFormat, MAX_PIN_ATTEMPTS } from '@/lib/auditor-pin';
 import type { Profile } from '@/types/database';
 
 /**
@@ -12,6 +13,11 @@ import type { Profile } from '@/types/database';
  *   3. Cancel patient packages + delete auto-created package_payments
  *   4. Delete doctor commissions
  *   5. Mark sale as voided (LAST — only after all reversals succeed)
+ *
+ * Authorization:
+ *   - Owner: can void directly (no PIN)
+ *   - Manager: must provide auditor_pin for approval
+ *   - Cashier/Auditor: cannot void
  *
  * Ordering invariant:
  *   All reversals run BEFORE the sale status is set to 'voided'.
@@ -31,14 +37,71 @@ export async function POST(
     const { data: rawProfile } = await supabase
       .from('profiles').select('*').eq('id', currentUser.id).single();
     const caller = rawProfile as Profile | null;
-    if (!caller || caller.role === 'cashier') {
+    if (!caller || caller.role === 'cashier' || caller.role === 'auditor') {
       return NextResponse.json({ error: 'Forbidden — manager or owner required' }, { status: 403 });
     }
 
     const body = await request.json();
-    const { reason = 'No reason provided' } = body as { reason?: string };
+    const { reason = 'No reason provided', auditor_pin } = body as { reason?: string; auditor_pin?: string };
 
     const adminClient = createAdminClient();
+
+    // ─── Auditor PIN validation (managers only) ──────────
+    let approvedByAuditorId: string | null = null;
+
+    if (caller.role === 'manager') {
+      if (!auditor_pin) {
+        return NextResponse.json({ error: 'Auditor PIN required for void approval' }, { status: 400 });
+      }
+      if (!isValidPinFormat(auditor_pin)) {
+        return NextResponse.json({ error: 'PIN must be exactly 6 digits' }, { status: 400 });
+      }
+
+      // Fetch active auditors
+      const { data: auditors } = await adminClient
+        .from('profiles')
+        .select('id, first_name, last_name, auditor_pin, pin_failed_attempts, pin_locked_until')
+        .eq('role', 'auditor')
+        .eq('is_active', true)
+        .not('auditor_pin', 'is', null);
+
+      if (!auditors || auditors.length === 0) {
+        return NextResponse.json({ error: 'No auditors configured. Contact the owner to set up an auditor account.' }, { status: 400 });
+      }
+
+      const now = new Date();
+      let pinValid = false;
+
+      for (const auditor of auditors as Record<string, unknown>[]) {
+        const lockedUntil = auditor.pin_locked_until ? new Date(auditor.pin_locked_until as string) : null;
+        if (lockedUntil && lockedUntil > now) continue; // skip locked auditor
+
+        const isValid = await verifyPin(auditor_pin, auditor.auditor_pin as string);
+        if (isValid) {
+          approvedByAuditorId = auditor.id as string;
+          pinValid = true;
+          // Reset failed attempts
+          await adminClient.from('profiles')
+            .update({ pin_failed_attempts: 0, pin_locked_until: null } as Record<string, unknown>)
+            .eq('id', auditor.id as string);
+          break;
+        }
+      }
+
+      if (!pinValid) {
+        // Increment failed attempts
+        for (const auditor of auditors as Record<string, unknown>[]) {
+          const failed = ((auditor.pin_failed_attempts as number) || 0) + 1;
+          const update: Record<string, unknown> = { pin_failed_attempts: failed };
+          if (failed >= MAX_PIN_ATTEMPTS) {
+            update.pin_locked_until = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
+          }
+          await adminClient.from('profiles').update(update).eq('id', auditor.id as string);
+        }
+        return NextResponse.json({ error: 'Invalid auditor PIN' }, { status: 403 });
+      }
+    }
+
 
     // Fetch sale
     const { data: saleData, error: saleError } = await adminClient
@@ -381,7 +444,10 @@ export async function POST(
     //   All reversals succeeded. Now it is safe to flip the status.
     const { error: voidError } = await adminClient
       .from('sales')
-      .update({ status: 'voided' } as Record<string, unknown>)
+      .update({
+        status: 'voided',
+        ...(approvedByAuditorId ? { void_approved_by: approvedByAuditorId, void_approved_at: new Date().toISOString() } : {}),
+      } as Record<string, unknown>)
       .eq('id', saleId);
 
     if (voidError) {
@@ -399,7 +465,7 @@ export async function POST(
       action_type: 'SALE_VOIDED',
       entity_type: 'sale',
       entity_id: saleId,
-      description: `Sale ${sale.receipt_number as string} voided — reason: ${reason}`,
+      description: `Sale ${sale.receipt_number as string} voided — reason: ${reason}${approvedByAuditorId ? ' (auditor approved)' : ' (owner authority)'}`,
       metadata: {
         receipt_number: sale.receipt_number,
         reason,
@@ -407,6 +473,7 @@ export async function POST(
         products_restored: productSaleItems.length,
         bom_logs_reversed: (bomLogs || []).length,
         packages_cancelled: cancelledPackages.length,
+        approved_by: approvedByAuditorId,
       },
     } as Record<string, unknown>);
 
