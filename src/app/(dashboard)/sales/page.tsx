@@ -602,23 +602,87 @@ export default function SalesPage() {
               </div>
             )}
 
-            {/* ─ Void / Refund Actions (manager/owner only, NOT auditor) ─ */}
-            {(isOwner || isManager) && !isAuditor && detailSale && (
-              <div className="flex gap-2 pt-1">
-                {(detailSale.status === 'completed' || detailSale.status === 'partial_refund') && (
-                  <button onClick={openRefund}
-                    className="flex-1 py-2 px-3 rounded-xl border border-amber-300 text-amber-700 text-xs font-medium hover:bg-amber-50 transition-colors">
-                    Issue Refund
-                  </button>
-                )}
-                {(detailSale.status === 'completed') && (
-                  <button onClick={openVoid}
-                    className="flex-1 py-2 px-3 rounded-xl border border-rose-300 text-rose-700 text-xs font-medium hover:bg-rose-50 transition-colors">
-                    Void Sale
-                  </button>
-                )}
-              </div>
-            )}
+            {/* ─ Action Buttons Row ─ */}
+            <div className="flex gap-2 pt-1">
+              {/* Reprint Receipt */}
+              <button onClick={() => {
+                if (!detailSale) return;
+                const w = window.open('', '_blank', 'width=380,height=600');
+                if (!w) return;
+                const items = (detailSale.items || []).map(i =>
+                  `<tr><td style="padding:2px 0">${i.name} ×${i.quantity}</td><td style="text-align:right;padding:2px 0">₱${i.total_price.toFixed(2)}</td></tr>`
+                ).join('');
+                const payments = (detailSale.payments || []).map(p =>
+                  `<tr><td style="padding:1px 0;text-transform:capitalize">${p.method.replace('_',' ')}</td><td style="text-align:right;padding:1px 0">₱${p.amount.toFixed(2)}</td></tr>`
+                ).join('');
+                w.document.write(`<!DOCTYPE html><html><head><title>Receipt ${detailSale.receipt_number}</title>
+                <style>
+                  * { margin:0; padding:0; box-sizing:border-box; }
+                  body { font-family:'Courier New',monospace; font-size:12px; padding:16px; max-width:350px; margin:0 auto; color:#111; }
+                  .center { text-align:center; }
+                  .bold { font-weight:bold; }
+                  .line { border-top:1px dashed #999; margin:8px 0; }
+                  table { width:100%; border-collapse:collapse; }
+                  .total-row { font-size:14px; font-weight:bold; border-top:1px solid #333; padding-top:4px; }
+                  .footer { margin-top:12px; font-size:10px; color:#666; text-align:center; }
+                  @media print { body { padding:0; } }
+                </style></head><body>
+                <div class="center bold" style="font-size:16px;margin-bottom:4px">FitWhite Aesthetics</div>
+                <div class="center" style="font-size:10px;margin-bottom:8px">${detailSale.branch_name}</div>
+                <div class="line"></div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+                  <span class="bold">${detailSale.receipt_number}</span>
+                  <span>${new Date(detailSale.created_at).toLocaleDateString('en-PH', {month:'short',day:'numeric',year:'numeric'})}</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+                  <span>Cashier: ${detailSale.cashier_name}</span>
+                </div>
+                <div style="margin-bottom:4px">Customer: ${detailSale.customer_name || 'Walk-in'}</div>
+                <div class="line"></div>
+                <table>${items}</table>
+                <div class="line"></div>
+                <table>
+                  <tr><td>Subtotal</td><td style="text-align:right">₱${detailSale.subtotal.toFixed(2)}</td></tr>
+                  ${detailSale.discount > 0 ? `<tr><td>Discount</td><td style="text-align:right">-₱${detailSale.discount.toFixed(2)}</td></tr>` : ''}
+                  ${detailSale.tax > 0 ? `<tr><td>Tax</td><td style="text-align:right">₱${detailSale.tax.toFixed(2)}</td></tr>` : ''}
+                  <tr class="total-row"><td>TOTAL</td><td style="text-align:right">₱${detailSale.total.toFixed(2)}</td></tr>
+                </table>
+                <div class="line"></div>
+                <div class="bold" style="margin-bottom:4px">Payment:</div>
+                <table>${payments}</table>
+                <div class="line"></div>
+                ${detailSale.status !== 'completed' ? `<div class="center bold" style="color:red;margin:8px 0">STATUS: ${detailSale.status.toUpperCase()}</div>` : ''}
+                <div class="footer">
+                  <p>Thank you for choosing FitWhite!</p>
+                  <p style="margin-top:4px">${new Date(detailSale.created_at).toLocaleString('en-PH')}</p>
+                  <p style="margin-top:2px;font-style:italic">*** REPRINT ***</p>
+                </div>
+                </body></html>`);
+                w.document.close();
+                setTimeout(() => w.print(), 300);
+              }}
+                className="flex-1 py-2 px-3 rounded-xl border border-brand-300 text-brand-700 text-xs font-medium hover:bg-brand-50 transition-colors">
+                🖨️ Reprint Receipt
+              </button>
+
+              {/* Void / Refund Actions (manager/owner only, NOT auditor) */}
+              {(isOwner || isManager) && !isAuditor && (
+                <>
+                  {(detailSale.status === 'completed' || detailSale.status === 'partial_refund') && (
+                    <button onClick={openRefund}
+                      className="flex-1 py-2 px-3 rounded-xl border border-amber-300 text-amber-700 text-xs font-medium hover:bg-amber-50 transition-colors">
+                      Issue Refund
+                    </button>
+                  )}
+                  {(detailSale.status === 'completed') && (
+                    <button onClick={openVoid}
+                      className="flex-1 py-2 px-3 rounded-xl border border-rose-300 text-rose-700 text-xs font-medium hover:bg-rose-50 transition-colors">
+                      Void Sale
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
 
             <button onClick={() => setDetailSale(null)}
               className="w-full py-2.5 px-4 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">

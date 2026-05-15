@@ -261,6 +261,49 @@ export default function CustomersPage() {
     }
   };
 
+  // ─── Refresh packages for current detail customer ──────
+  const refreshCustomerPackages = useCallback(async (customerId: string) => {
+    if (!ENABLE_PATIENT_PACKAGES) return;
+    try {
+      const { data: pkgData } = await supabase
+        .from('patient_packages')
+        .select('id, status, total_price, total_paid, remaining_balance, total_sessions, sessions_used, created_at, services:service_id(name)')
+        .eq('customer_id', customerId)
+        .order('created_at', { ascending: false });
+      setCustomerPackages((pkgData || []).map((p: Record<string, unknown>) => ({
+        id: p.id as string,
+        service_name: (p.services as Record<string, unknown>)?.name as string || 'Unknown',
+        status: p.status as string,
+        total_price: Number(p.total_price),
+        total_paid: Number(p.total_paid),
+        remaining_balance: Number(p.remaining_balance),
+        total_sessions: Number(p.total_sessions),
+        sessions_used: Number(p.sessions_used),
+        created_at: p.created_at as string,
+      })));
+    } catch (err) {
+      console.error('Refresh packages error:', err);
+    }
+  }, [supabase]);
+
+  // Realtime: auto-refresh packages when sessions/payments change
+  useEffect(() => {
+    if (!detailCustomer || !ENABLE_PATIENT_PACKAGES) return;
+    const channel = supabase
+      .channel(`pkg-realtime-${detailCustomer.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'patient_packages' }, () => {
+        refreshCustomerPackages(detailCustomer.id);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'package_sessions' }, () => {
+        refreshCustomerPackages(detailCustomer.id);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'package_payments' }, () => {
+        refreshCustomerPackages(detailCustomer.id);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [supabase, detailCustomer, refreshCustomerPackages]);
+
   // ─── Filtering ──────────────────────────────────────────
 
   const filteredCustomers = customers.filter(c => {
