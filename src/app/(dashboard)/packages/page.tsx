@@ -77,6 +77,11 @@ export default function PackagesPage() {
   const [paymentForm, setPaymentForm] = useState({ amount: '', method: 'cash', reference_number: '', notes: '' });
   const [paymentSubmitting, setPaymentSubmitting] = useState(false);
 
+  // Complete Package Modal
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [completeNotes, setCompleteNotes] = useState('');
+  const [completeSubmitting, setCompleteSubmitting] = useState(false);
+
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [formError, setFormError] = useState('');
 
@@ -266,6 +271,31 @@ export default function PackagesPage() {
       setFormError('An unexpected error occurred');
     } finally {
       setPaymentSubmitting(false);
+    }
+  };
+
+  // ─── Complete Package Early ────────────────────────────
+
+  const handleCompletePackage = async () => {
+    if (!selectedPkg) return;
+    setCompleteSubmitting(true);
+    setFormError('');
+    try {
+      const res = await fetch(`/api/packages/${selectedPkg.id}/complete`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: completeNotes || null }),
+      });
+      const result = await res.json();
+      if (!res.ok) { setFormError(result.error); return; }
+      setShowCompleteModal(false);
+      setCompleteNotes('');
+      await refreshDetailAfterWrite(selectedPkg.id);
+    } catch (err) {
+      console.error('Complete package error:', err);
+      setFormError('An unexpected error occurred');
+    } finally {
+      setCompleteSubmitting(false);
     }
   };
 
@@ -496,6 +526,13 @@ export default function PackagesPage() {
                 >
                   💳 Record Payment
                 </button>
+                <button
+                  onClick={() => { setShowCompleteModal(true); setFormError(''); }}
+                  className="py-2.5 px-4 rounded-xl border border-brand-300 text-brand-600 text-sm font-medium
+                             hover:bg-brand-50 transition-all"
+                >
+                  ✅ Complete
+                </button>
               </div>
             )}
 
@@ -659,6 +696,49 @@ export default function PackagesPage() {
               {paymentSubmitting ? 'Processing...' : 'Record Payment'}
             </button>
             <button onClick={() => setShowPaymentModal(false)}
+              className="px-4 py-2.5 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">
+              Cancel
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ═══ Complete Package Modal ════════════════════════════ */}
+      <Modal
+        isOpen={showCompleteModal}
+        onClose={() => setShowCompleteModal(false)}
+        title="Complete Package Early"
+        subtitle={selectedPkg ? `${selectedPkg.service_name} — ${selectedPkg.sessions_used}/${selectedPkg.total_sessions} sessions used` : ''}
+        size="sm"
+      >
+        <div className="space-y-4">
+          {formError && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{formError}</div>
+          )}
+
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <p className="text-sm text-amber-800 font-medium">⚠️ This will mark the package as completed.</p>
+            <p className="text-xs text-amber-600 mt-1">Remaining unused sessions will not be available. This action cannot be undone.</p>
+            {selectedPkg && selectedPkg.remaining_balance > 0 && (
+              <p className="text-xs text-rose-600 mt-2 font-medium">Note: Outstanding balance of {formatCurrency(selectedPkg.remaining_balance)} will remain.</p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-brand-800 mb-1.5">Reason <span className="text-brand-300 font-normal">(optional)</span></label>
+            <textarea value={completeNotes} onChange={e => setCompleteNotes(e.target.value)}
+              rows={2} placeholder="e.g. Customer satisfied, no more sessions needed"
+              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900 placeholder:text-brand-300
+                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all resize-none" />
+          </div>
+
+          <div className="flex gap-3 pt-2">
+            <button onClick={handleCompletePackage} disabled={completeSubmitting}
+              className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white font-medium text-sm
+                         hover:from-brand-700 hover:to-brand-800 disabled:opacity-60 disabled:cursor-not-allowed transition-all shadow-sm">
+              {completeSubmitting ? 'Completing...' : 'Complete Package'}
+            </button>
+            <button onClick={() => setShowCompleteModal(false)}
               className="px-4 py-2.5 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">
               Cancel
             </button>

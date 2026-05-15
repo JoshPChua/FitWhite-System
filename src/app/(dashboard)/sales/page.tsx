@@ -650,6 +650,16 @@ export default function SalesPage() {
                 <div class="line"></div>
                 <div class="bold" style="margin-bottom:4px">Payment:</div>
                 <table>${payments}</table>
+                ${(() => {
+                  const totalPaid = (detailSale.payments || []).reduce((s, p) => s + p.amount, 0);
+                  const balance = detailSale.total - totalPaid;
+                  return balance > 0.01 ? `
+                <div class="line"></div>
+                <table>
+                  <tr><td>Amount Paid</td><td style="text-align:right">₱${totalPaid.toFixed(2)}</td></tr>
+                  <tr class="bold" style="color:#c00"><td>REMAINING BALANCE</td><td style="text-align:right">₱${balance.toFixed(2)}</td></tr>
+                </table>` : '';
+                })()}
                 <div class="line"></div>
                 ${detailSale.status !== 'completed' ? `<div class="center bold" style="color:red;margin:8px 0">STATUS: ${detailSale.status.toUpperCase()}</div>` : ''}
                 <div class="footer">

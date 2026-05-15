@@ -237,12 +237,17 @@ export default function CustomersPage() {
     }
 
     // Fetch transaction history (sales)
+    await refreshCustomerSales(customer.id);
+  };
+
+  // ─── Refresh sales for current detail customer ─────────
+  const refreshCustomerSales = useCallback(async (customerId: string) => {
     setIsLoadingSales(true);
     try {
       const { data: salesData } = await supabase
         .from('sales')
         .select('id, receipt_number, total, status, created_at, payments(method, amount), sale_items:sale_items(name, quantity, total_price)')
-        .eq('customer_id', customer.id)
+        .eq('customer_id', customerId)
         .order('created_at', { ascending: false })
         .limit(50);
       setCustomerSales((salesData || []).map((s: Record<string, unknown>) => ({
@@ -259,7 +264,7 @@ export default function CustomersPage() {
     } finally {
       setIsLoadingSales(false);
     }
-  };
+  }, [supabase]);
 
   // ─── Refresh packages for current detail customer ──────
   const refreshCustomerPackages = useCallback(async (customerId: string) => {
@@ -286,11 +291,14 @@ export default function CustomersPage() {
     }
   }, [supabase]);
 
-  // Realtime: auto-refresh packages when sessions/payments change
+  // Realtime: auto-refresh packages AND sales when data changes
   useEffect(() => {
-    if (!detailCustomer || !ENABLE_PATIENT_PACKAGES) return;
+    if (!detailCustomer) return;
     const channel = supabase
-      .channel(`pkg-realtime-${detailCustomer.id}`)
+      .channel(`customer-detail-${detailCustomer.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' }, () => {
+        refreshCustomerSales(detailCustomer.id);
+      })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'patient_packages' }, () => {
         refreshCustomerPackages(detailCustomer.id);
       })
@@ -302,7 +310,7 @@ export default function CustomersPage() {
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [supabase, detailCustomer, refreshCustomerPackages]);
+  }, [supabase, detailCustomer, refreshCustomerSales, refreshCustomerPackages]);
 
   // ─── Filtering ──────────────────────────────────────────
 
