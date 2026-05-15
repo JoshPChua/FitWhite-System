@@ -75,10 +75,24 @@ function buildNav(role: 'owner' | 'manager' | 'cashier' | 'auditor'): NavEntry[]
     nav.push({ href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard });
   }
 
-  // ─── Auditor: limited nav (reports/finance + audit only) ───
+  // ─── Auditor: full visibility (reports/finance + audit + history) ───
   if (isAuditor) {
     nav.push({ href: '/customers', label: 'Customers', icon: Users });
 
+    // Clinic group (view-only)
+    const clinicItems: NavItem[] = [
+      { href: '/services', label: 'Services', icon: Syringe },
+      { href: '/bundles', label: 'Bundles', icon: Gift },
+    ];
+    if (ENABLE_PATIENT_PACKAGES) {
+      clinicItems.push({ href: '/packages', label: 'Packages', icon: Package });
+    }
+    if (ENABLE_DOCTOR_COMMISSIONS) {
+      clinicItems.push({ href: '/doctors', label: 'Doctors', icon: Stethoscope });
+    }
+    nav.push({ id: 'clinic', label: 'Clinic', icon: Stethoscope, items: clinicItems });
+
+    // Finance group
     const financeItems: NavItem[] = [
       { href: '/sales', label: 'Sales', icon: BadgeDollarSign },
     ];
@@ -88,6 +102,20 @@ function buildNav(role: 'owner' | 'manager' | 'cashier' | 'auditor'): NavEntry[]
     financeItems.push({ href: '/reports', label: 'Reports', icon: BarChart3 });
     nav.push({ id: 'finance', label: 'Finance', icon: BadgeDollarSign, items: financeItems });
 
+    // Inventory (view-only)
+    const inventoryItems: NavItem[] = [
+      { href: '/products', label: 'Products', icon: Package },
+      { href: '/inventory', label: 'Stock Levels', icon: Boxes },
+    ];
+    if (ENABLE_SERVICE_BOM) {
+      inventoryItems.push({ href: '/inventory-logs', label: 'Stock Logs', icon: ClipboardList });
+    }
+    nav.push({ id: 'inventory', label: 'Inventory', icon: Boxes, items: inventoryItems });
+
+    // Shifts & Audit Logs
+    if (ENABLE_SHIFTS) {
+      nav.push({ href: '/shifts', label: 'Shifts', icon: Clock });
+    }
     nav.push({ href: '/audit-logs', label: 'Audit Logs', icon: FileText });
     return nav;
   }

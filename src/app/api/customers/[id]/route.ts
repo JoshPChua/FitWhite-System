@@ -83,6 +83,35 @@ export async function PATCH(
       .select('id, first_name, last_name')
       .single();
 
+    // Fallback: if source/referred_by columns don't exist yet (migration 010 not applied)
+    if (updateError && updateError.message?.includes('column')) {
+      const { source: _s, referred_by: _r, ...fallbackData } = updateData;
+      if (Object.keys(fallbackData).length === 0) {
+        return jsonError('No fields to update (source/referred_by not yet available)', 400);
+      }
+      const result2 = await adminClient
+        .from('customers')
+        .update(fallbackData)
+        .eq('id', customerId)
+        .select('id, first_name, last_name')
+        .single();
+      if (result2.error) {
+        return jsonError(result2.error.message, 500);
+      }
+      // Continue with result2 data
+      const updated2 = result2.data;
+      await adminClient.from('audit_logs').insert({
+        user_id: userId,
+        branch_id: existingCustomer.branch_id as string,
+        action_type: 'UPDATE_CUSTOMER',
+        entity_type: 'customer',
+        entity_id: customerId,
+        description: `Updated patient ${(updated2 as Record<string, unknown>).first_name} ${(updated2 as Record<string, unknown>).last_name}`,
+        metadata: { changes: fallbackData },
+      } as Record<string, unknown>);
+      return NextResponse.json({ success: true, customer: updated2 });
+    }
+
     if (updateError) {
       return jsonError(updateError.message, 500);
     }

@@ -112,21 +112,45 @@ export async function POST(request: NextRequest) {
     }
 
     // ─── Insert customer ────────────────────────────────────
-    const { data: customer, error: insertError } = await adminClient
+    const insertPayload: Record<string, unknown> = {
+      branch_id: resolvedBranchId,
+      first_name: first_name.trim(),
+      last_name: last_name.trim(),
+      email: email?.trim() || null,
+      phone: phone?.trim() || null,
+      allergies: allergies?.trim() || null,
+      notes: notes?.trim() || null,
+    };
+
+    // Only include source/referred_by if migration 010 has been applied
+    // (avoids "column not found" errors on databases that haven't run it yet)
+    if (source && source !== 'walk_in') insertPayload.source = source;
+    if (referred_by) insertPayload.referred_by = referred_by;
+
+    let customer: Record<string, unknown> | null = null;
+    let insertError;
+
+    // Attempt insert with all fields
+    const result1 = await adminClient
       .from('customers')
-      .insert({
-        branch_id: resolvedBranchId,
-        first_name: first_name.trim(),
-        last_name: last_name.trim(),
-        email: email?.trim() || null,
-        phone: phone?.trim() || null,
-        allergies: allergies?.trim() || null,
-        notes: notes?.trim() || null,
-        source: source || 'walk_in',
-        referred_by: referred_by || null,
-      } as Record<string, unknown>)
+      .insert(insertPayload)
       .select('id, first_name, last_name')
       .single();
+
+    if (result1.error && result1.error.message?.includes('column')) {
+      // Fallback: retry without source/referred_by columns
+      const { source: _s, referred_by: _r, ...fallbackPayload } = insertPayload;
+      const result2 = await adminClient
+        .from('customers')
+        .insert(fallbackPayload)
+        .select('id, first_name, last_name')
+        .single();
+      customer = result2.data as Record<string, unknown> | null;
+      insertError = result2.error;
+    } else {
+      customer = result1.data as Record<string, unknown> | null;
+      insertError = result1.error;
+    }
 
     if (insertError) {
       console.error('Customer creation error:', insertError);

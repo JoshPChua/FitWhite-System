@@ -60,11 +60,13 @@ function BarChart({ data, max, color = '#4f6ef7' }: { data: number[]; max: numbe
 // ─── Component ──────────────────────────────────────────────
 
 export default function ReportsPage() {
-  const { isOwner, isManager, selectedBranch, profile, branches } = useAuth();
+  const { isOwner, isManager, isAuditor, selectedBranch, profile, branches } = useAuth();
   const [data, setData] = useState<ReportData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [filterBranch, setFilterBranch] = useState('');
-  const [filterPeriod, setFilterPeriod] = useState<'7d' | '30d' | '90d' | 'all'>('30d');
+  const [filterPeriod, setFilterPeriod] = useState<'7d' | '30d' | '90d' | 'all' | 'custom'>('30d');
+  const [customDateFrom, setCustomDateFrom] = useState('');
+  const [customDateTo, setCustomDateTo] = useState('');
 
   const supabase = createClient();
 
@@ -80,9 +82,14 @@ export default function ReportsPage() {
         : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
 
       const periodDays = filterPeriod === '7d' ? 7 : filterPeriod === '30d' ? 30 : filterPeriod === '90d' ? 90 : null;
-      const dateFrom = periodDays
-        ? new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString()
-        : null;
+      let dateFrom: string | null = null;
+      let dateTo: string | null = null;
+      if (filterPeriod === 'custom') {
+        if (customDateFrom) dateFrom = new Date(customDateFrom + 'T00:00:00').toISOString();
+        if (customDateTo) dateTo = new Date(customDateTo + 'T23:59:59').toISOString();
+      } else if (periodDays) {
+        dateFrom = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString();
+      }
 
       // ─── Sales query ─────────────────────────────────
       let salesQuery = supabase
@@ -90,12 +97,14 @@ export default function ReportsPage() {
         .select('id, total, subtotal, discount, status, branch_id, created_at, branches:branch_id(name)');
       if (branchFilter) salesQuery = salesQuery.eq('branch_id', branchFilter);
       if (dateFrom) salesQuery = salesQuery.gte('created_at', dateFrom);
+      if (dateTo) salesQuery = salesQuery.lte('created_at', dateTo);
       const { data: salesData } = await salesQuery;
 
       // Refunds
       let refundQuery = supabase.from('refunds').select('amount, branch_id, created_at');
       if (branchFilter) refundQuery = refundQuery.eq('branch_id', branchFilter);
       if (dateFrom) refundQuery = refundQuery.gte('created_at', dateFrom);
+      if (dateTo) refundQuery = refundQuery.lte('created_at', dateTo);
       const { data: refundsData } = await refundQuery;
 
       // Sale items for top items
@@ -131,6 +140,7 @@ export default function ReportsPage() {
         let commQuery = supabase.from('doctor_commissions').select('commission_amount, is_paid');
         if (branchFilter) commQuery = commQuery.eq('branch_id', branchFilter);
         if (dateFrom) commQuery = commQuery.gte('created_at', dateFrom);
+        if (dateTo) commQuery = commQuery.lte('created_at', dateTo);
         const { data: commData } = await commQuery;
         (commData || []).forEach((c: Record<string, unknown>) => {
           const amt = Number(c.commission_amount);
@@ -146,6 +156,7 @@ export default function ReportsPage() {
         let ppQuery = supabase.from('package_payments').select('amount');
         if (branchFilter) ppQuery = ppQuery.eq('branch_id', branchFilter);
         if (dateFrom) ppQuery = ppQuery.gte('created_at', dateFrom);
+        if (dateTo) ppQuery = ppQuery.lte('created_at', dateTo);
         const { data: ppData } = await ppQuery;
         installmentCollected = (ppData || []).reduce((s: number, p: Record<string, unknown>) => s + Number(p.amount), 0);
 
@@ -165,6 +176,7 @@ export default function ReportsPage() {
         let cmQuery = supabase.from('cash_movements').select('movement_type, amount');
         if (branchFilter) cmQuery = cmQuery.eq('branch_id', branchFilter);
         if (dateFrom) cmQuery = cmQuery.gte('created_at', dateFrom);
+        if (dateTo) cmQuery = cmQuery.lte('created_at', dateTo);
         const { data: cmData } = await cmQuery;
         (cmData || []).forEach((m: Record<string, unknown>) => {
           if (m.movement_type === 'petty_cash_out') pettyCashTotal += Number(m.amount);
@@ -178,6 +190,7 @@ export default function ReportsPage() {
         let ilQuery = supabase.from('inventory_logs').select('source, quantity_delta');
         if (branchFilter) ilQuery = ilQuery.eq('branch_id', branchFilter);
         if (dateFrom) ilQuery = ilQuery.gte('created_at', dateFrom);
+        if (dateTo) ilQuery = ilQuery.lte('created_at', dateTo);
         ilQuery = ilQuery.lt('quantity_delta', 0);
         const { data: ilData } = await ilQuery;
         (ilData || []).forEach((l: Record<string, unknown>) => {
@@ -200,10 +213,20 @@ export default function ReportsPage() {
 
       // Daily stats
       const dailyMap = new Map<string, { revenue: number; transactions: number }>();
-      const days = Math.min(periodDays || 30, 30);
-      for (let i = days - 1; i >= 0; i--) {
-        const date = new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        dailyMap.set(date, { revenue: 0, transactions: 0 });
+      if (filterPeriod === 'custom' && customDateFrom) {
+        const start = new Date(customDateFrom);
+        const end = customDateTo ? new Date(customDateTo) : new Date();
+        const diffDays = Math.min(Math.ceil((end.getTime() - start.getTime()) / (24*60*60*1000)) + 1, 90);
+        for (let i = 0; i < diffDays; i++) {
+          const d = new Date(start.getTime() + i * 24*60*60*1000).toISOString().split('T')[0];
+          dailyMap.set(d, { revenue: 0, transactions: 0 });
+        }
+      } else {
+        const days = Math.min(periodDays || 30, 30);
+        for (let i = days - 1; i >= 0; i--) {
+          const date = new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+          dailyMap.set(date, { revenue: 0, transactions: 0 });
+        }
       }
       for (const sale of completedSales) {
         const date = (sale.created_at as string).split('T')[0];
@@ -279,7 +302,7 @@ export default function ReportsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [supabase, isOwner, selectedBranch?.id, profile?.branch_id, filterBranch, filterPeriod]);
+  }, [supabase, isOwner, selectedBranch?.id, profile?.branch_id, filterBranch, filterPeriod, customDateFrom, customDateTo]);
 
   useEffect(() => { fetchReports(); }, [fetchReports]);
 
@@ -299,25 +322,41 @@ export default function ReportsPage() {
 
   // ─── CSV Export ─────────────────────────────────────────────
 
+  // Helper: generate metadata header rows for every CSV
+  const csvHeader = (title: string): string => {
+    const now = new Date().toLocaleString('en-PH', { dateStyle: 'long', timeStyle: 'short' });
+    const periodLabel = filterPeriod === 'custom'
+      ? `${customDateFrom || 'start'} to ${customDateTo || 'today'}`
+      : filterPeriod === '7d' ? 'Last 7 Days' : filterPeriod === '30d' ? 'Last 30 Days' : filterPeriod === '90d' ? 'Last 90 Days' : 'All Time';
+    const branchLabel = selectedBranch?.name || 'Imus';
+    return [
+      `"FitWhite Aesthetics — ${title}"`,
+      `"Branch: ${branchLabel}"`,
+      `"Period: ${periodLabel}"`,
+      `"Generated: ${now}"`,
+      '',
+    ].join('\n');
+  };
+
   const handleExportSales = () => {
     if (!data) return;
     const columns: CsvColumn<DailyStat>[] = [
       { header: 'Date', accessor: r => r.date },
-      { header: 'Revenue', accessor: r => csvCurrency(r.revenue) },
-      { header: 'Transactions', accessor: r => r.transactions },
+      { header: 'Gross Revenue (PHP)', accessor: r => csvCurrency(r.revenue) },
+      { header: 'No. of Transactions', accessor: r => r.transactions },
     ];
-    downloadCsv(toCsv(data.dailyStats, columns), `daily-revenue-${filterPeriod}.csv`);
+    downloadCsv(csvHeader('Daily Revenue Report') + toCsv(data.dailyStats, columns), `daily-revenue-${filterPeriod}.csv`);
   };
 
   const handleExportTopItems = () => {
     if (!data) return;
     const columns: CsvColumn<TopItem>[] = [
-      { header: 'Item', accessor: r => r.name },
-      { header: 'Type', accessor: r => r.item_type },
+      { header: 'Item Name', accessor: r => r.name },
+      { header: 'Type (Service/Product)', accessor: r => r.item_type },
       { header: 'Qty Sold', accessor: r => r.count },
-      { header: 'Revenue', accessor: r => csvCurrency(r.revenue) },
+      { header: 'Total Revenue (PHP)', accessor: r => csvCurrency(r.revenue) },
     ];
-    downloadCsv(toCsv(data.topItems, columns), `top-items-${filterPeriod}.csv`);
+    downloadCsv(csvHeader('Top Items Report') + toCsv(data.topItems, columns), `top-items-${filterPeriod}.csv`);
   };
 
   const handleExportSummary = () => {
@@ -348,7 +387,7 @@ export default function ReportsPage() {
       ['Sale Product Deductions', String(data.saleDeductions)],
     ];
     const csv = lines.map(row => row.join(',')).join('\n');
-    downloadCsv(csv, `report-summary-${filterPeriod}.csv`);
+    downloadCsv(csvHeader('Full Summary Report') + csv, `report-summary-${filterPeriod}.csv`);
   };
 
   // ─── NEW: Detailed Daily Sales CSV (per-transaction) ───────
@@ -357,7 +396,14 @@ export default function ReportsPage() {
       ? (filterBranch || null)
       : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
     const periodDays = filterPeriod === '7d' ? 7 : filterPeriod === '30d' ? 30 : filterPeriod === '90d' ? 90 : null;
-    const dateFrom = periodDays ? new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString() : null;
+    let dateFrom: string | null = null;
+    let dateTo: string | null = null;
+    if (filterPeriod === 'custom') {
+      if (customDateFrom) dateFrom = new Date(customDateFrom + 'T00:00:00').toISOString();
+      if (customDateTo) dateTo = new Date(customDateTo + 'T23:59:59').toISOString();
+    } else if (periodDays) {
+      dateFrom = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString();
+    }
 
     let q = supabase
       .from('sales')
@@ -366,6 +412,7 @@ export default function ReportsPage() {
       .order('created_at', { ascending: false });
     if (branchFilter) q = q.eq('branch_id', branchFilter);
     if (dateFrom) q = q.gte('created_at', dateFrom);
+    if (dateTo) q = q.lte('created_at', dateTo);
     const { data: salesData } = await q;
     if (!salesData || salesData.length === 0) { alert('No sales data to export'); return; }
 
@@ -391,17 +438,17 @@ export default function ReportsPage() {
       branch: (s.branches as Record<string, unknown>)?.name as string || '',
     }));
     const columns: CsvColumn<SaleRow>[] = [
-      { header: 'Date', accessor: r => r.date },
-      { header: 'Receipt', accessor: r => r.receipt },
-      { header: 'Customer', accessor: r => r.customer },
-      { header: 'Cashier', accessor: r => r.cashier },
-      { header: 'Total', accessor: r => r.total },
-      { header: 'Discount', accessor: r => r.discount },
-      { header: 'Payment Methods', accessor: r => r.payment_methods },
-      { header: 'Status', accessor: r => r.status },
+      { header: 'Date & Time', accessor: r => r.date },
+      { header: 'Receipt No.', accessor: r => r.receipt },
+      { header: 'Customer Name', accessor: r => r.customer },
+      { header: 'Processed By', accessor: r => r.cashier },
+      { header: 'Sale Total (PHP)', accessor: r => r.total },
+      { header: 'Discount (PHP)', accessor: r => r.discount },
+      { header: 'Payment Method(s)', accessor: r => r.payment_methods },
+      { header: 'Sale Status', accessor: r => r.status },
       { header: 'Branch', accessor: r => r.branch },
     ];
-    downloadCsv(toCsv(rows, columns), `daily-sales-detail-${filterPeriod}.csv`);
+    downloadCsv(csvHeader('Daily Sales Detail Report') + toCsv(rows, columns), `daily-sales-detail-${filterPeriod}.csv`);
   };
 
   // ─── NEW: Cash Movement CSV ────────────────────────────────
@@ -410,14 +457,22 @@ export default function ReportsPage() {
       ? (filterBranch || null)
       : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
     const periodDays = filterPeriod === '7d' ? 7 : filterPeriod === '30d' ? 30 : filterPeriod === '90d' ? 90 : null;
-    const dateFrom = periodDays ? new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString() : null;
+    let cmDateFrom: string | null = null;
+    let cmDateTo: string | null = null;
+    if (filterPeriod === 'custom') {
+      if (customDateFrom) cmDateFrom = new Date(customDateFrom + 'T00:00:00').toISOString();
+      if (customDateTo) cmDateTo = new Date(customDateTo + 'T23:59:59').toISOString();
+    } else if (periodDays) {
+      cmDateFrom = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString();
+    }
 
     let q = supabase
       .from('cash_movements')
       .select('*, performer:performed_by(first_name, last_name), shifts:shift_id(opened_at, closed_at, status)')
       .order('created_at', { ascending: false });
     if (branchFilter) q = q.eq('branch_id', branchFilter);
-    if (dateFrom) q = q.gte('created_at', dateFrom);
+    if (cmDateFrom) q = q.gte('created_at', cmDateFrom);
+    if (cmDateTo) q = q.lte('created_at', cmDateTo);
     const { data: cmData } = await q;
     if (!cmData || cmData.length === 0) { alert('No cash movements to export'); return; }
 
@@ -433,15 +488,15 @@ export default function ReportsPage() {
       shift_status: m.shifts ? (m.shifts as Record<string, unknown>).status as string : 'No shift',
     }));
     const columns: CsvColumn<CmRow>[] = [
-      { header: 'Date', accessor: r => r.date },
-      { header: 'Type', accessor: r => r.type },
-      { header: 'Amount', accessor: r => r.amount },
-      { header: 'Description', accessor: r => r.description },
-      { header: 'Reference', accessor: r => r.reference },
+      { header: 'Date & Time', accessor: r => r.date },
+      { header: 'Movement Type', accessor: r => r.type },
+      { header: 'Amount (PHP)', accessor: r => r.amount },
+      { header: 'Description / Purpose', accessor: r => r.description },
+      { header: 'Reference No.', accessor: r => r.reference },
       { header: 'Performed By', accessor: r => r.performer },
       { header: 'Shift Status', accessor: r => r.shift_status },
     ];
-    downloadCsv(toCsv(rows, columns), `cash-movements-${filterPeriod}.csv`);
+    downloadCsv(csvHeader('Cash Movements Report') + toCsv(rows, columns), `cash-movements-${filterPeriod}.csv`);
   };
 
   // ─── NEW: Payment Methods Breakdown CSV ────────────────────
@@ -457,11 +512,11 @@ export default function ReportsPage() {
     }));
     const columns: CsvColumn<PayRow>[] = [
       { header: 'Payment Method', accessor: r => r.method },
-      { header: 'Total Amount', accessor: r => r.amount },
-      { header: 'Transaction Count', accessor: r => r.count },
-      { header: '% of Total', accessor: r => r.pct },
+      { header: 'Total Amount (PHP)', accessor: r => r.amount },
+      { header: 'No. of Transactions', accessor: r => r.count },
+      { header: '% of Total Revenue', accessor: r => r.pct },
     ];
-    downloadCsv(toCsv(rows, columns), `payment-methods-${filterPeriod}.csv`);
+    downloadCsv(csvHeader('Payment Methods Breakdown') + toCsv(rows, columns), `payment-methods-${filterPeriod}.csv`);
   };
 
   // ─── Render ─────────────────────────────────────────────
@@ -479,15 +534,25 @@ export default function ReportsPage() {
         <div className="flex items-center gap-2 flex-wrap">
           {/* Period filter */}
           <div className="flex rounded-xl border border-brand-200 overflow-hidden bg-white">
-            {(['7d', '30d', '90d', 'all'] as const).map(period => (
+            {(['7d', '30d', '90d', 'all', 'custom'] as const).map(period => (
               <button key={period} onClick={() => setFilterPeriod(period)}
                 className={`px-3 py-1.5 text-xs font-medium transition-colors ${
                   filterPeriod === period ? 'bg-brand-600 text-white' : 'text-brand-500 hover:bg-brand-50'
                 }`}>
-                {period === '7d' ? '7 Days' : period === '30d' ? '30 Days' : period === '90d' ? '90 Days' : 'All Time'}
+                {period === '7d' ? '7 Days' : period === '30d' ? '30 Days' : period === '90d' ? '90 Days' : period === 'custom' ? '📅 Custom' : 'All Time'}
               </button>
             ))}
           </div>
+          {/* Custom date range */}
+          {filterPeriod === 'custom' && (
+            <div className="flex items-center gap-2">
+              <input type="date" value={customDateFrom} onChange={e => setCustomDateFrom(e.target.value)}
+                className="px-2 py-1.5 rounded-xl border border-brand-200 bg-white text-xs text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-400/50" />
+              <span className="text-xs text-brand-400">to</span>
+              <input type="date" value={customDateTo} onChange={e => setCustomDateTo(e.target.value)}
+                className="px-2 py-1.5 rounded-xl border border-brand-200 bg-white text-xs text-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-400/50" />
+            </div>
+          )}
           {/* Branch filter (owner only) */}
           {isOwner && !IMUS_ONLY && (
             <select value={filterBranch} onChange={e => setFilterBranch(e.target.value)}
