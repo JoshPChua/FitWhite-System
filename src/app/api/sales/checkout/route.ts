@@ -723,6 +723,7 @@ export async function POST(request: NextRequest) {
             downpayment: allocated,
             total_paid: allocated,
             total_sessions: sessionCount * svcItem.quantity,
+            sessions_used: 1, // First session happens during the sale itself
             attending_doctor_id: attending_doctor_id || null,
             status: 'active',
             notes: `Auto-created from sale ${receiptNumber}`,
@@ -745,6 +746,16 @@ export async function POST(request: NextRequest) {
           service_name: svcItem.name,
           total_sessions: sessionCount * svcItem.quantity,
         });
+
+        // Log the initial session (session #1 happened at point-of-sale)
+        await adminClient.from('package_sessions').insert({
+          package_id: pkgId,
+          branch_id,
+          performed_by: currentUser.id,
+          doctor_id: attending_doctor_id || null,
+          sessions_count: 1,
+          notes: `Initial session — sale ${receiptNumber}`,
+        } as Record<string, unknown>);
 
         // Record downpayment in package_payments ledger (REQUIRED)
         if (allocated > 0) {
