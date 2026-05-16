@@ -10,17 +10,17 @@ import {
  *
  * Two correction types:
  *
- * 1. Void a session: { action: 'void_session', session_id, reason }
- *    - Soft-voids a package_sessions row (is_voided = true)
- *    - The upgraded trigger recalculates sessions_used from SUM
- *    - Writes audit_log
+ * 1. Void a session: { action: 'void_session', session_id, reason, auditor_pin? }
+ *    - Calls void_package_session RPC (atomic cascade: session + sale + payment + BOM)
+ *    - Owner can void without PIN
+ *    - Manager/cashier must provide auditor_pin (verified against profiles.auditor_pin)
  *
  * 2. Adjust total sessions: { action: 'adjust_total', new_total, reason }
  *    - Validates new_total >= current non-voided sessions_used
  *    - Updates patient_packages.total_sessions
- *    - Writes audit_log
+ *    - Owner/manager only
  *
- * Owner/manager only. Auditors blocked.
+ * Auditors blocked.
  */
 export async function POST(
   request: NextRequest,
@@ -33,9 +33,9 @@ export async function POST(
     if (isErrorResponse(auth)) return auth;
     const { userId, profile: caller } = auth;
 
-    // Only owner/manager can correct
-    if (caller.role !== 'owner' && caller.role !== 'manager') {
-      return jsonError('Only owners and managers can make corrections', 403);
+    // Auditors cannot correct
+    if (caller.role === 'auditor') {
+      return jsonError('Auditors cannot make corrections', 403);
     }
 
     const adminClient = createAdminClient();
@@ -62,13 +62,17 @@ export async function POST(
     if (caller.role === 'manager' && caller.branch_id !== branchId) {
       return jsonError('Cannot correct packages from a different branch', 403);
     }
+    if (caller.role === 'cashier' && caller.branch_id !== branchId) {
+      return jsonError('Cannot correct packages from a different branch', 403);
+    }
 
     const body = await request.json();
-    const { action, session_id, new_total, reason } = body as {
+    const { action, session_id, new_total, reason, auditor_pin } = body as {
       action: 'void_session' | 'adjust_total';
       session_id?: string;
       new_total?: number;
       reason?: string;
+      auditor_pin?: string;
     };
 
     if (!reason?.trim()) {
@@ -81,87 +85,61 @@ export async function POST(
         return jsonError('session_id is required for void_session', 400);
       }
 
-      // Fetch the session
-      const { data: session, error: sessErr } = await adminClient
-        .from('package_sessions')
-        .select('id, package_id, sessions_count, is_voided, created_at')
-        .eq('id', session_id)
-        .eq('package_id', packageId)
-        .single();
+      // PIN verification for non-owners
+      if (caller.role !== 'owner') {
+        if (!auditor_pin) {
+          return jsonError('Auditor PIN is required for void approval', 400);
+        }
 
-      if (sessErr || !session) {
-        return jsonError('Session not found in this package', 404);
+        // Find any auditor in this branch and verify their PIN
+        const { data: auditors } = await adminClient
+          .from('profiles')
+          .select('id, auditor_pin')
+          .eq('role', 'auditor')
+          .not('auditor_pin', 'is', null);
+
+        const pinMatch = (auditors || []).some(
+          (a: Record<string, unknown>) => a.auditor_pin === auditor_pin
+        );
+
+        if (!pinMatch) {
+          return jsonError('Invalid auditor PIN', 403);
+        }
       }
 
-      const sessData = session as Record<string, unknown>;
-      if (sessData.is_voided === true) {
-        return jsonError('Session is already voided', 400);
+      // Call the atomic void RPC
+      const { data: rpcResult, error: rpcError } = await adminClient
+        .rpc('void_package_session', {
+          p_session_id: session_id,
+          p_package_id: packageId,
+          p_voided_by: userId,
+          p_void_reason: reason.trim(),
+          p_branch_id: branchId,
+        });
+
+      if (rpcError) {
+        console.error('void_package_session RPC error:', rpcError);
+        return jsonError(rpcError.message || 'Failed to void session', 500);
       }
-
-      // Soft-void the session (trigger will recalculate sessions_used)
-      const { error: voidErr } = await adminClient
-        .from('package_sessions')
-        .update({
-          is_voided: true,
-          voided_by: userId,
-          voided_at: new Date().toISOString(),
-          void_reason: reason.trim(),
-        } as Record<string, unknown>)
-        .eq('id', session_id);
-
-      if (voidErr) {
-        return jsonError(`Failed to void session: ${voidErr.message}`, 500);
-      }
-
-      // Re-read updated sessions_used after trigger
-      const { data: updatedPkg } = await adminClient
-        .from('patient_packages')
-        .select('sessions_used')
-        .eq('id', packageId)
-        .single();
-
-      const newSessionsUsed = updatedPkg
-        ? (updatedPkg as Record<string, unknown>).sessions_used as number
-        : null;
-
-      // Audit log
-      await adminClient.from('audit_logs').insert({
-        user_id: userId,
-        branch_id: branchId,
-        action_type: 'VOID_SESSION',
-        entity_type: 'package_session',
-        entity_id: session_id,
-        description: `Voided session ${session_id} (${sessData.sessions_count} session(s)) from package ${packageId}. Reason: ${reason.trim()}`,
-        metadata: {
-          package_id: packageId,
-          session_id,
-          sessions_count: sessData.sessions_count,
-          sessions_used_before: pkgData.sessions_used,
-          sessions_used_after: newSessionsUsed,
-          reason: reason.trim(),
-        },
-      } as Record<string, unknown>);
 
       return new Response(
-        JSON.stringify({
-          success: true,
-          action: 'void_session',
-          session_id,
-          sessions_count: sessData.sessions_count,
-          sessions_used_before: pkgData.sessions_used,
-          sessions_used_after: newSessionsUsed,
-        }),
+        JSON.stringify(rpcResult || { success: true }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
     // ─── Action: Adjust Total Sessions ────────────────────
     if (action === 'adjust_total') {
+      // Only owner/manager can adjust totals
+      if (caller.role !== 'owner' && caller.role !== 'manager') {
+        return jsonError('Only owners and managers can adjust total sessions', 403);
+      }
+
       if (typeof new_total !== 'number' || !Number.isFinite(new_total) || new_total < 1) {
         return jsonError('new_total must be a positive integer', 400);
       }
 
-      // Recalculate current non-voided sessions_used from DB (authoritative)
+      // Recalculate current non-voided sessions_used from DB
       const { data: sessionRows } = await adminClient
         .from('package_sessions')
         .select('sessions_count')
@@ -219,7 +197,6 @@ export async function POST(
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       );
     }
-
 
     return jsonError(`Unknown action: ${action}`, 400);
   } catch (error) {

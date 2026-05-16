@@ -330,6 +330,7 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `014_auditor_rls_hardening.sql` | Auditor excluded from all INSERT/UPDATE/DELETE RLS policies |
 | `015_customer_lifecycle_session_accuracy.sql` | Customer lifecycle triggers + session soft-void support |
 | `016_category_tables.sql` | Normalised category tables with expression unique indices, backfill from text columns |
+| `017_void_cascade_treatment_history.sql` | Atomic void RPC (cascade to sale/payment/BOM), treatment_history in visit RPC |
 
 ### Seed Files
 

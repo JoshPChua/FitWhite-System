@@ -50,16 +50,10 @@ interface ServiceFormData {
   default_session_count: string;
 }
 
-const SERVICE_CATEGORIES = [
-  'IV Therapy',
-  'Injection',
-  'Facial Treatment',
-  'Skin Treatment',
-  'Laser Treatment',
-  'Consultation',
-  'Package',
-  'Other',
-];
+interface DbCategory {
+  id: string;
+  name: string;
+}
 
 // ─── Component ──────────────────────────────────────────────
 
@@ -102,7 +96,55 @@ export default function ServicesPage() {
   const [bomSubmitting, setBomSubmitting] = useState(false);
   const [bomCounts, setBomCounts] = useState<Map<string, number>>(new Map());
 
+  // Dynamic categories
+  const [dbCategories, setDbCategories] = useState<DbCategory[]>([]);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [creatingCategory, setCreatingCategory] = useState(false);
+  const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
+
   const supabase = createClient();
+
+  // ─── Fetch Categories ───────────────────────────────────
+
+  const fetchCategories = useCallback(async () => {
+    const branchId = isManager ? selectedBranch?.id : (selectedBranch?.id || branches[0]?.id);
+    if (!branchId) return;
+    try {
+      const res = await fetch(`/api/service-categories?branch_id=${branchId}`);
+      if (res.ok) {
+        const result = await res.json();
+        setDbCategories(result.data || []);
+      }
+    } catch (err) {
+      console.error('Category fetch error:', err);
+    }
+  }, [isManager, selectedBranch?.id, branches]);
+
+  useEffect(() => { fetchCategories(); }, [fetchCategories]);
+
+  const handleCreateCategory = async () => {
+    if (!newCategoryName.trim() || creatingCategory) return;
+    setCreatingCategory(true);
+    try {
+      const branchId = isManager ? selectedBranch?.id : (selectedBranch?.id || branches[0]?.id);
+      const res = await fetch('/api/service-categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch_id: branchId, name: newCategoryName.trim() }),
+      });
+      if (res.ok) {
+        const result = await res.json();
+        setDbCategories(prev => [...prev, result.data]);
+        setFormData(prev => ({ ...prev, category: newCategoryName.trim() }));
+        setNewCategoryName('');
+        setShowNewCategoryInput(false);
+      } else {
+        const err = await res.json();
+        setFormError(err.error || 'Failed to create category');
+      }
+    } catch { setFormError('Failed to create category'); }
+    finally { setCreatingCategory(false); }
+  };
 
   // ─── Fetch ──────────────────────────────────────────────
 
@@ -164,7 +206,9 @@ export default function ServicesPage() {
     return true;
   });
 
-  const categories = [...new Set(services.map(s => s.category).filter(Boolean))] as string[];
+  const categories = dbCategories.length > 0
+    ? dbCategories.map(c => c.name)
+    : [...new Set(services.map(s => s.category).filter(Boolean))] as string[];
 
   // ─── Modal Handlers ─────────────────────────────────────
 
@@ -435,7 +479,7 @@ export default function ServicesPage() {
                          focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all"
             >
               <option value="">All categories</option>
-              {SERVICE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
           <div>
@@ -695,15 +739,47 @@ export default function ServicesPage() {
           {/* Category */}
           <div>
             <label className="block text-sm font-medium text-brand-800 mb-1.5">Category</label>
-            <select
-              value={formData.category}
-              onChange={e => setFormData({ ...formData, category: e.target.value })}
-              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
-                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all"
-            >
-              <option value="">Select category...</option>
-              {SERVICE_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <div className="space-y-2">
+              <select
+                value={formData.category}
+                onChange={e => {
+                  if (e.target.value === '__new__') {
+                    setShowNewCategoryInput(true);
+                  } else {
+                    setFormData({ ...formData, category: e.target.value });
+                    setShowNewCategoryInput(false);
+                  }
+                }}
+                className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
+                           focus:outline-none focus:ring-2 focus:ring-brand-400/50 focus:border-brand-400 transition-all"
+              >
+                <option value="">Select category...</option>
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                {canManage && <option value="__new__">＋ Create new category...</option>}
+              </select>
+              {showNewCategoryInput && (
+                <div className="flex gap-2">
+                  <input
+                    type="text" value={newCategoryName} onChange={e => setNewCategoryName(e.target.value)}
+                    placeholder="New category name" autoFocus
+                    className="flex-1 px-3 py-2 rounded-xl border border-brand-200 bg-surface-50 text-sm text-brand-900
+                               focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all"
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleCreateCategory(); } }}
+                  />
+                  <button
+                    type="button" onClick={handleCreateCategory} disabled={creatingCategory || !newCategoryName.trim()}
+                    className="px-3 py-2 rounded-xl bg-brand-600 text-white text-sm font-medium hover:bg-brand-700
+                               disabled:opacity-50 transition-all"
+                  >
+                    {creatingCategory ? '...' : 'Add'}
+                  </button>
+                  <button type="button" onClick={() => { setShowNewCategoryInput(false); setNewCategoryName(''); }}
+                    className="px-2 py-2 rounded-xl border border-brand-200 text-brand-500 text-sm hover:bg-brand-50 transition-all">
+                    ✕
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Session Count */}

@@ -89,6 +89,7 @@ export default function PackagesPage() {
   // Correction state
   const [voidingSessionId, setVoidingSessionId] = useState<string | null>(null);
   const [voidReason, setVoidReason] = useState('');
+  const [voidPin, setVoidPin] = useState('');
   const [voidSubmitting, setVoidSubmitting] = useState(false);
   const [showAdjustTotal, setShowAdjustTotal] = useState(false);
   const [adjustTotalValue, setAdjustTotalValue] = useState('');
@@ -601,7 +602,7 @@ export default function PackagesPage() {
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
                         <Badge variant={s.is_voided ? 'danger' : 'brand'} size="sm">×{s.sessions_count}</Badge>
-                        {canManage && !s.is_voided && (
+                        {!s.is_voided && (isOwner || isManager || profile?.role === 'cashier') && (
                           voidingSessionId === s.id ? (
                             <div className="flex flex-col gap-1 ml-2">
                               <input
@@ -609,21 +610,36 @@ export default function PackagesPage() {
                                 placeholder="Reason..." autoFocus
                                 className="w-28 px-2 py-1 rounded border border-rose-300 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400"
                               />
+                              {!isOwner && (
+                                <input
+                                  type="password" value={voidPin} onChange={e => setVoidPin(e.target.value)}
+                                  placeholder="Auditor PIN"
+                                  className="w-28 px-2 py-1 rounded border border-amber-300 text-xs focus:outline-none focus:ring-1 focus:ring-amber-400"
+                                />
+                              )}
                               <div className="flex gap-1">
                                 <button
-                                  disabled={voidSubmitting || !voidReason.trim()}
+                                  disabled={voidSubmitting || !voidReason.trim() || (!isOwner && !voidPin.trim())}
                                   onClick={async () => {
                                     setVoidSubmitting(true);
+                                    setFormError('');
                                     try {
+                                      const payload: Record<string, unknown> = {
+                                        action: 'void_session',
+                                        session_id: s.id,
+                                        reason: voidReason.trim(),
+                                      };
+                                      if (!isOwner) payload.auditor_pin = voidPin.trim();
                                       const res = await fetch(`/api/packages/${selectedPkg?.id}/correct`, {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ action: 'void_session', session_id: s.id, reason: voidReason.trim() }),
+                                        body: JSON.stringify(payload),
                                       });
                                       const result = await res.json();
                                       if (!res.ok) { setFormError(result.error || 'Void failed'); return; }
                                       setVoidingSessionId(null);
                                       setVoidReason('');
+                                      setVoidPin('');
                                       await refreshDetailAfterWrite(selectedPkg!.id);
                                     } catch { setFormError('Network error'); } finally { setVoidSubmitting(false); }
                                   }}
@@ -631,14 +647,14 @@ export default function PackagesPage() {
                                 >
                                   {voidSubmitting ? '...' : 'Void'}
                                 </button>
-                                <button onClick={() => { setVoidingSessionId(null); setVoidReason(''); }} className="px-2 py-0.5 rounded border border-brand-200 text-brand-500 text-[10px]">
+                                <button onClick={() => { setVoidingSessionId(null); setVoidReason(''); setVoidPin(''); }} className="px-2 py-0.5 rounded border border-brand-200 text-brand-500 text-[10px]">
                                   ✕
                                 </button>
                               </div>
                             </div>
                           ) : (
                             <button
-                              onClick={() => { setVoidingSessionId(s.id); setVoidReason(''); }}
+                              onClick={() => { setVoidingSessionId(s.id); setVoidReason(''); setVoidPin(''); }}
                               className="text-xs text-rose-400 hover:text-rose-600 font-medium transition-colors"
                               title="Void this session"
                             >

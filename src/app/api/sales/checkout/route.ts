@@ -784,6 +784,28 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ─── Treatment History (for customer profile) ─────────────
+    //     Write one row per service item so the customer's profile
+    //     shows a complete history of all treatments received.
+
+    if (customer_id) {
+      const serviceItems = verifiedItems.filter(i => i.item_type === 'service');
+      for (const svcItem of serviceItems) {
+        try {
+          await adminClient.from('treatment_history').insert({
+            customer_id,
+            branch_id,
+            service_name: svcItem.name,
+            notes: `POS Sale — Receipt ${receiptNumber}`,
+            administered_by: currentUser.id,
+          } as Record<string, unknown>);
+        } catch (thErr) {
+          // Non-critical — log but don't fail the sale
+          console.error('Treatment history write error:', thErr);
+        }
+      }
+    }
+
     // ─── Audit Log ───────────────────────────────────────────
 
     await adminClient.from('audit_logs').insert({
