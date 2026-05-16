@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/providers/auth-provider';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Badge } from '@/components/ui/badge';
 import { ENABLE_DOCTOR_COMMISSIONS, ENABLE_SERVICE_BOM, IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
@@ -78,8 +79,16 @@ const PAYMENT_LABELS: Record<PaymentMethod, string> = {
 // ─── Component ───────────────────────────────────────────────
 
 export default function POSPage() {
-  const { profile, isOwner, isManager, selectedBranch, branches } = useAuth();
+  const { profile, isOwner, isManager, isAuditor, selectedBranch, branches } = useAuth();
+  const router = useRouter();
   const supabase = createClient();
+
+  // Auditor redirect — auditors must not access POS
+  useEffect(() => {
+    if (isAuditor) {
+      router.replace('/dashboard');
+    }
+  }, [isAuditor, router]);
 
   // POS Branch — cashier uses their own, owner/manager can switch
   const [posBranch, setPosBranch] = useState(selectedBranch);

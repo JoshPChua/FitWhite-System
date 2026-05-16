@@ -237,7 +237,10 @@ export function Sidebar() {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
         e.preventDefault();
-        router.push('/pos');
+        // Auditors cannot access POS
+        if (role !== 'auditor') {
+          router.push('/pos');
+        }
       }
     };
     window.addEventListener('keydown', handler);
@@ -346,7 +349,7 @@ export function Sidebar() {
     <>
       {/* Brand Header */}
       <div className="px-4 py-3.5 border-b border-brand-100/50 flex items-center justify-between">
-        <Link href={role === 'owner' || role === 'manager' ? '/dashboard' : '/pos'} className="flex items-center gap-2.5">
+        <Link href={role === 'cashier' ? '/pos' : '/dashboard'} className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm">
             <span className="text-xs font-bold text-white font-display">FW</span>
           </div>

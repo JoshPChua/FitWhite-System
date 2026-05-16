@@ -28,6 +28,11 @@ export async function POST(
     if (isErrorResponse(auth)) return auth;
     const { userId, profile: caller } = auth;
 
+    // Auditor is view-only — cannot record payments
+    if (caller.role === 'auditor') {
+      return jsonError('Auditors cannot record package payments', 403);
+    }
+
     const body = await request.json();
     const {
       amount,

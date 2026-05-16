@@ -32,6 +32,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
+    // Auditor is view-only — cannot create sales
+    if (caller.role === 'auditor') {
+      return NextResponse.json({ error: 'Auditors cannot create sales' }, { status: 403 });
+    }
+
     const body = await request.json();
     const {
       branch_id,

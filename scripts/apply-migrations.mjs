@@ -1,6 +1,12 @@
 /**
  * FitWhite - Apply Supabase Migrations
  * Connects directly to Supabase PostgreSQL and applies migration files.
+ *
+ * Required environment variables:
+ *   SUPABASE_DB_HOST     — e.g. db.xxxxxxxxxxxx.supabase.co
+ *   SUPABASE_DB_PASSWORD — your Supabase database password
+ *
+ * NEVER commit real credentials. Use .env.local or export them in your shell.
  */
 import pg from 'pg';
 import { readFileSync } from 'fs';
@@ -8,12 +14,24 @@ import { resolve } from 'path';
 
 const { Client } = pg;
 
+// ─── Validate required env vars ─────────────────────────────
+const DB_HOST = process.env.SUPABASE_DB_HOST;
+const DB_PASSWORD = process.env.SUPABASE_DB_PASSWORD;
+
+if (!DB_HOST || !DB_PASSWORD) {
+  console.error('\n❌  Missing required environment variables:');
+  if (!DB_HOST)     console.error('   • SUPABASE_DB_HOST     (e.g. db.xxxxxxxxxxxx.supabase.co)');
+  if (!DB_PASSWORD) console.error('   • SUPABASE_DB_PASSWORD (your Supabase database password)');
+  console.error('\n   Set them in .env.local or export in your shell before running.\n');
+  process.exit(1);
+}
+
 const client = new Client({
-  host: 'db.cdtmufbsexzlgucmlols.supabase.co',
+  host: DB_HOST,
   port: 5432,
   database: 'postgres',
   user: 'postgres',
-  password: 'Fitwhite2026!',
+  password: DB_PASSWORD,
   ssl: { rejectUnauthorized: false },
   connectionTimeoutMillis: 30000,
   statement_timeout: 60000,
@@ -51,7 +69,7 @@ async function applyMigration(label, sql) {
 
 async function main() {
   printHeader('FitWhite Database Migration Runner');
-  console.log(`\n  Host: db.cdtmufbsexzlgucmlols.supabase.co`);
+  console.log(`\n  Host: ${DB_HOST}`);
   console.log(`  DB:   postgres`);
 
   console.log('\n  Connecting...');

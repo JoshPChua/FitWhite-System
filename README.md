@@ -97,7 +97,8 @@
 ### User & Role Management
 - **Owner** — full system access across all branches
 - **Manager** — full access within their branch only
-- **Cashier** — POS and operational access (same as manager within their branch)
+- **Cashier** — POS and operational access within their branch
+- **Auditor** — read-only access to finance, reports, commissions, audit logs, and customer data. Cannot access POS or create/modify any transactions.
 
 ### Doctor Management
 - Standalone `doctors` table (no Supabase Auth account required)
@@ -229,6 +230,11 @@ cp .env.example .env.local
 #    supabase/migrations/006_doctors_table.sql
 #    supabase/migrations/007_production_hardening.sql
 #    supabase/migrations/008_doctor_branch_guard.sql
+#    supabase/migrations/010_customer_enhancements.sql
+#    supabase/migrations/011_auditor_role.sql
+#    supabase/migrations/012_record_visit_rpc.sql
+#    supabase/migrations/013_lockdown_rpc_permissions.sql
+#    supabase/migrations/014_auditor_rls_hardening.sql
 
 # 4. Create the seed auth users
 npx ts-node scripts/seed-auth-users.ts
@@ -317,6 +323,11 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `007_production_hardening.sql` | Atomic checkout RPC, receipt counters, branch authorization |
 | `008_doctor_branch_guard.sql` | Doctor branch-match enforcement in commission trigger |
 | `009_imus_only_cleanup.sql` | **Imus pilot only** — removes non-Imus data + invariant assertions. Do NOT run for multi-branch. |
+| `010_customer_enhancements.sql` | Customer source tracking, referral FK, last_transaction_at trigger |
+| `011_auditor_role.sql` | Auditor role enum, PIN fields, void/refund approval tracking |
+| `012_record_visit_rpc.sql` | Atomic RPC for combined "Record Visit + Payment" workflow |
+| `013_lockdown_rpc_permissions.sql` | Locks SECURITY DEFINER RPCs to service_role only |
+| `014_auditor_rls_hardening.sql` | Auditor excluded from all INSERT/UPDATE/DELETE RLS policies |
 
 ### Seed Files
 
@@ -350,15 +361,32 @@ They create every table, index, function, trigger, and RLS policy the system nee
 
 ## Security
 
+> **⚠️ SECRET ROTATION REQUIRED BEFORE GO-LIVE**
+>
+> If Supabase credentials (DB password, service role key, anon key) were ever committed to
+> version control — even in a private repo — you **must** rotate them in the Supabase dashboard
+> before deploying to production. Git history preserves all previously committed values.
+
 | Threat | Protection |
 |---|---|
 | Unauthorized access | Supabase JWT authentication |
 | Price/item tampering | Server-side price re-verification at checkout |
 | Cross-branch data leak | Imus-only branch filtering + manager-branch restrictions |
-| Admin endpoint abuse | Service role key server-side only |
+| Admin endpoint abuse | Service role key server-side only; RPCs locked to service_role |
 | SQL injection | Supabase parameterized queries |
 | Session hijacking | JWT expiry + refresh token rotation |
 | BOM oversell race | Negative-stock detection + full sale rollback |
+| Auditor data mutation | API-level role blocks + RLS excludes auditor from writes |
+| Direct RPC bypass | REVOKE EXECUTE from PUBLIC/anon/authenticated on sensitive RPCs |
+
+### Deployment Order
+
+1. **Rotate secrets** in Supabase dashboard (DB password, API keys)
+2. **Apply migrations** 001–014 in order via SQL Editor
+3. **Verify** Imus branch exists: `SELECT code FROM branches;` → `'IMS'`
+4. **Set env vars** in Vercel (from `.env.example`)
+5. **Deploy** to Vercel
+6. **Smoke test** per checklist below
 
 ---
 

@@ -1,9 +1,25 @@
 
 # FitWhite - Apply Supabase Migrations via Management API
-# Usage: .\scripts\apply-migrations.ps1
+#
+# Required environment variable:
+#   $env:SUPABASE_SERVICE_ROLE_KEY — your Supabase service_role JWT
+#
+# NEVER commit the service role key. Set it in your shell before running:
+#   $env:SUPABASE_SERVICE_ROLE_KEY = "eyJ..."
+#   .\scripts\apply-migrations.ps1
 
 $PROJECT_REF = "cdtmufbsexzlgucmlols"
-$SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNkdG11ZmJzZXh6bGd1Y21sb2xzIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTcyOTYxMSwiZXhwIjoyMDkxMzA1NjExfQ.rHSYEZsCwnga5A8orBuefuzbStJ_oEQAxio-IV2ArmM"
+
+# ─── Validate required env var ───────────────────────────────
+if (-not $env:SUPABASE_SERVICE_ROLE_KEY) {
+    Write-Host "`n❌  Missing required environment variable: SUPABASE_SERVICE_ROLE_KEY" -ForegroundColor Red
+    Write-Host "    Set it before running:" -ForegroundColor Gray
+    Write-Host '    $env:SUPABASE_SERVICE_ROLE_KEY = "eyJ..."' -ForegroundColor Gray
+    Write-Host ""
+    exit 1
+}
+
+$SERVICE_ROLE_KEY = $env:SUPABASE_SERVICE_ROLE_KEY
 
 $headers = @{
     "Authorization" = "Bearer $SERVICE_ROLE_KEY"

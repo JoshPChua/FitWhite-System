@@ -47,6 +47,11 @@ export async function POST(
     if (isErrorResponse(auth)) return auth;
     const { userId, profile: caller } = auth;
 
+    // Auditor is view-only — cannot record visits
+    if (caller.role === 'auditor') {
+      return jsonError('Auditors cannot record package visits', 403);
+    }
+
     const body = await request.json();
     const {
       sessions_count = 1,

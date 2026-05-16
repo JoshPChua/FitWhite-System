@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
     const { data: rawProfile } = await supabase
       .from('profiles').select('*').eq('id', user.id).single();
     const caller = rawProfile as Profile | null;
-    if (!caller || !caller.is_active || (caller.role !== 'owner' && caller.role !== 'manager')) {
+    if (!caller || !caller.is_active || (caller.role !== 'owner' && caller.role !== 'manager' && caller.role !== 'auditor')) {
       return NextResponse.json({ error: 'Insufficient permissions' }, { status: 403 });
     }
 

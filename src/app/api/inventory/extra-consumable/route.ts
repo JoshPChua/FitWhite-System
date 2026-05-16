@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { assertImusOnlyBranch, IMUS_ONLY, IMUS_BRANCH_CODE } from '@/lib/feature-flags';
 import type { Profile } from '@/types/database';
 
 /**
@@ -22,6 +23,11 @@ export async function POST(request: NextRequest) {
     const caller = rawProfile as Profile | null;
     if (!caller || !caller.is_active) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    // Auditor is view-only — cannot deduct consumables
+    if (caller.role === 'auditor') {
+      return NextResponse.json({ error: 'Auditors cannot deduct consumables' }, { status: 403 });
     }
 
     const body = await request.json();
@@ -46,6 +52,18 @@ export async function POST(request: NextRequest) {
     }
 
     const adminClient = createAdminClient();
+
+    // Imus-only guard
+    if (IMUS_ONLY) {
+      const { data: imusBranch } = await adminClient
+        .from('branches').select('id').eq('code', IMUS_BRANCH_CODE).single();
+      const imusBranchId = imusBranch ? (imusBranch as Record<string, unknown>).id as string : null;
+      try {
+        assertImusOnlyBranch(branch_id, imusBranchId);
+      } catch {
+        return NextResponse.json({ error: 'This installation is restricted to the Imus branch' }, { status: 403 });
+      }
+    }
 
     // Get product name
     const { data: product } = await adminClient
