@@ -69,6 +69,7 @@ export default function PackagesPage() {
 
   // Record Visit Modal (combined session + optional payment)
   const [showVisitModal, setShowVisitModal] = useState(false);
+  const [visitMode, setVisitMode] = useState<'session_only' | 'session_payment'>('session_only');
   const [visitForm, setVisitForm] = useState({
     doctor_id: '', notes: '', sessions_count: '1',
     payment_amount: '', payment_method: 'cash', reference_number: '',
@@ -217,7 +218,7 @@ export default function PackagesPage() {
     setVisitSubmitting(true);
     setFormError('');
     try {
-      const paymentAmount = parseFloat(visitForm.payment_amount) || 0;
+      const paymentAmount = visitMode === 'session_payment' ? (parseFloat(visitForm.payment_amount) || 0) : 0;
 
       const res = await fetch(`/api/packages/${selectedPkg.id}/sessions`, {
         method: 'POST',
@@ -234,6 +235,7 @@ export default function PackagesPage() {
       const result = await res.json();
       if (!res.ok) { setFormError(result.error); return; }
       setShowVisitModal(false);
+      setVisitMode('session_only');
       setVisitForm({ doctor_id: '', notes: '', sessions_count: '1', payment_amount: '', payment_method: 'cash', reference_number: '' });
       await refreshDetailAfterWrite(selectedPkg.id);
     } catch (err) {
@@ -481,7 +483,7 @@ export default function PackagesPage() {
             {selectedPkg.status === 'active' && (
               <div className="flex gap-3">
                 <button
-                  onClick={() => { setShowVisitModal(true); setFormError(''); setVisitForm(f => ({ ...f, payment_amount: selectedPkg.remaining_balance > 0 ? '' : '0' })); }}
+                  onClick={() => { setShowVisitModal(true); setFormError(''); setVisitMode('session_only'); setVisitForm(f => ({ ...f, payment_amount: '' })); }}
                   disabled={selectedPkg.sessions_used >= selectedPkg.total_sessions}
                   className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white text-sm font-medium
                              hover:from-brand-700 hover:to-brand-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
@@ -605,17 +607,17 @@ export default function PackagesPage() {
               {/* Toggle: session-only vs session+payment */}
               <div className="flex rounded-xl border border-brand-200 overflow-hidden bg-white">
                 <button type="button"
-                  onClick={() => setVisitForm(f => ({ ...f, payment_amount: '0' }))}
+                  onClick={() => setVisitMode('session_only')}
                   className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                    visitForm.payment_amount === '0' || visitForm.payment_amount === ''
+                    visitMode === 'session_only'
                       ? 'bg-brand-600 text-white' : 'text-brand-500 hover:bg-brand-50'
                   }`}>
                   Session Only (no payment)
                 </button>
                 <button type="button"
-                  onClick={() => setVisitForm(f => ({ ...f, payment_amount: '' }))}
+                  onClick={() => setVisitMode('session_payment')}
                   className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                    visitForm.payment_amount !== '0' && visitForm.payment_amount !== ''
+                    visitMode === 'session_payment'
                       ? 'bg-emerald-600 text-white' : 'text-brand-500 hover:bg-brand-50'
                   }`}>
                   Session + Payment
@@ -623,7 +625,7 @@ export default function PackagesPage() {
               </div>
 
               {/* Payment fields (shown when payment is selected) */}
-              {visitForm.payment_amount !== '0' && visitForm.payment_amount !== '' ? (
+              {visitMode === 'session_payment' ? (
                 <div className="space-y-3 bg-emerald-50/50 border border-emerald-100 rounded-xl p-3">
                   <div>
                     <label className="block text-xs font-medium text-brand-700 mb-1">Payment Amount (₱)</label>
@@ -681,7 +683,7 @@ export default function PackagesPage() {
             <button onClick={handleRecordVisit} disabled={visitSubmitting}
               className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white font-medium text-sm
                          hover:from-brand-700 hover:to-brand-800 disabled:opacity-60 disabled:cursor-not-allowed transition-all shadow-sm">
-              {visitSubmitting ? 'Recording...' : (parseFloat(visitForm.payment_amount) > 0 ? '📋 Record Visit + Payment' : '📋 Record Visit')}
+              {visitSubmitting ? 'Recording...' : (visitMode === 'session_payment' && parseFloat(visitForm.payment_amount) > 0 ? '📋 Record Visit + Payment' : '📋 Record Visit')}
             </button>
             <button onClick={() => setShowVisitModal(false)}
               className="px-4 py-2.5 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">
