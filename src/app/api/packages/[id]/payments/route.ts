@@ -5,6 +5,8 @@ import {
   requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
 } from '@/lib/api-helpers';
 
+const VALID_PAYMENT_METHODS = ['cash', 'gcash', 'card', 'bank_transfer'] as const;
+
 /**
  * POST /api/packages/[id]/payments
  *
@@ -41,6 +43,10 @@ export async function POST(
 
     if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
       return jsonError('amount must be a finite number > 0', 400);
+    }
+
+    if (!VALID_PAYMENT_METHODS.includes(method as typeof VALID_PAYMENT_METHODS[number])) {
+      return jsonError(`method must be one of: ${VALID_PAYMENT_METHODS.join(', ')}`, 400);
     }
 
     const adminClient = createAdminClient();
@@ -105,7 +111,20 @@ export async function POST(
       receiptNumber = receiptData as string;
     }
 
-    let saleRecord: Record<string, unknown> | null = null;
+    // ── Rollback helper for payment sub-writes ──
+    let createdSaleId: string | null = null;
+    let createdSaleItemId: string | null = null;
+    let createdPaymentId: string | null = null;
+
+    const rollbackSale = async () => {
+      try {
+        if (createdPaymentId) await adminClient.from('payments').delete().eq('id', createdPaymentId);
+        if (createdSaleItemId) await adminClient.from('sale_items').delete().eq('id', createdSaleItemId);
+        if (createdSaleId) await adminClient.from('sales').delete().eq('id', createdSaleId);
+      } catch (rbErr) {
+        console.error('Sale rollback error (may be partially written):', rbErr);
+      }
+    };
 
     // Create sale record (visible in Sales page + Customer transactions + Reports)
     const { data: saleData, error: saleError } = await adminClient
@@ -128,29 +147,44 @@ export async function POST(
 
     if (saleError) {
       console.error('Installment sale creation error:', saleError);
-    } else {
-      saleRecord = saleData as Record<string, unknown>;
-      const saleId = saleRecord.id as string;
-
-      // Create sale_items entry
-      await adminClient.from('sale_items').insert({
-        sale_id: saleId,
-        item_type: 'service',
-        item_id: pkgData.service_id,
-        name: `${serviceName} — Installment Payment`,
-        quantity: 1,
-        unit_price: amount,
-        total_price: amount,
-      } as Record<string, unknown>);
-
-      // Create payment entry
-      await adminClient.from('payments').insert({
-        sale_id: saleId,
-        method,
-        amount,
-        reference_number: reference_number || null,
-      } as Record<string, unknown>);
+      return jsonError(`Failed to create sale record: ${saleError.message}`, 500);
     }
+
+    const saleRecord = saleData as Record<string, unknown>;
+    createdSaleId = saleRecord.id as string;
+
+    // Create sale_items entry
+    const { data: saleItemData, error: saleItemError } = await adminClient.from('sale_items').insert({
+      sale_id: createdSaleId,
+      item_type: 'service',
+      service_id: pkgData.service_id,
+      name: `${serviceName} — Installment Payment`,
+      quantity: 1,
+      unit_price: amount,
+      total_price: amount,
+    } as Record<string, unknown>).select('id').single();
+
+    if (saleItemError) {
+      console.error('sale_items insert failed, rolling back sale:', saleItemError.message);
+      await rollbackSale();
+      return jsonError(`Failed to create sale item: ${saleItemError.message}`, 500);
+    }
+    createdSaleItemId = (saleItemData as Record<string, unknown>).id as string;
+
+    // Create payment entry
+    const { data: paymentInsertData, error: paymentInsertError } = await adminClient.from('payments').insert({
+      sale_id: createdSaleId,
+      method,
+      amount,
+      reference_number: reference_number || null,
+    } as Record<string, unknown>).select('id').single();
+
+    if (paymentInsertError) {
+      console.error('payments insert failed, rolling back sale:', paymentInsertError.message);
+      await rollbackSale();
+      return jsonError(`Failed to create payment record: ${paymentInsertError.message}`, 500);
+    }
+    createdPaymentId = (paymentInsertData as Record<string, unknown>).id as string;
 
     // ─── Insert package payment (DB trigger updates total_paid) ──
     const { data: payment, error: paymentError } = await adminClient
@@ -162,14 +196,14 @@ export async function POST(
         amount,
         method,
         reference_number: reference_number || null,
-        notes: saleRecord
-          ? `Installment payment — Receipt ${(saleRecord as Record<string, unknown>).receipt_number}`
-          : (notes || null),
+        notes: `Installment payment — Receipt ${saleRecord.receipt_number}`,
       } as Record<string, unknown>)
       .select('*')
       .single();
 
     if (paymentError) {
+      // Rollback sale records since the ledger entry failed
+      await rollbackSale();
       // Check for the over-payment trigger error
       if (paymentError.message.includes('Payment rejected') || paymentError.code === '23514') {
         return jsonError(
@@ -187,11 +221,11 @@ export async function POST(
       action_type: 'PACKAGE_PAYMENT',
       entity_type: 'package_payment',
       entity_id: (payment as Record<string, unknown>).id as string,
-      description: `Payment of ₱${amount.toFixed(2)} received via ${method} for package ${packageId}${saleRecord ? ` — Receipt ${(saleRecord as Record<string, unknown>).receipt_number}` : ''}`,
-      metadata: { package_id: packageId, amount, method, reference_number, receipt_number: saleRecord ? (saleRecord as Record<string, unknown>).receipt_number : null },
+      description: `Payment of ₱${amount.toFixed(2)} received via ${method} for package ${packageId} — Receipt ${saleRecord.receipt_number}`,
+      metadata: { package_id: packageId, amount, method, reference_number, receipt_number: saleRecord.receipt_number },
     } as Record<string, unknown>);
 
-    return NextResponse.json({ data: payment, receipt_number: saleRecord ? (saleRecord as Record<string, unknown>).receipt_number : null }, { status: 201 });
+    return NextResponse.json({ data: payment, receipt_number: saleRecord.receipt_number }, { status: 201 });
   } catch (error) {
     console.error('POST /api/packages/[id]/payments error:', error);
     return jsonError('Internal server error', 500);

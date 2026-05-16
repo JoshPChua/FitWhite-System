@@ -147,7 +147,8 @@ export async function DELETE(
 
     if ((usageCount || 0) > 0) {
       // Soft delete
-      await adminClient.from('services').update({ is_active: false }).eq('id', serviceId);
+      const { error: softDeleteErr } = await adminClient.from('services').update({ is_active: false }).eq('id', serviceId);
+      if (softDeleteErr) return jsonError(`Soft delete failed: ${softDeleteErr.message}`, 500);
     } else {
       // Hard delete
       const { error } = await adminClient.from('services').delete().eq('id', serviceId);

@@ -664,7 +664,7 @@ export default function PackagesPage() {
                 </div>
               ) : (
                 <p className="text-xs text-brand-400 bg-surface-50 rounded-xl px-4 py-3 text-center">
-                  💡 No payment will be collected for this visit. Select "Session + Payment" above to include an installment.
+                  💡 No payment will be collected for this visit. Select &ldquo;Session + Payment&rdquo; above to include an installment.
                 </p>
               )}
             </>

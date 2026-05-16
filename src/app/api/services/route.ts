@@ -3,24 +3,52 @@ import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 import {
   requireActiveProfile, enforceImusOnly, assertBranchAccess,
-  isErrorResponse, jsonError,
+  resolveImusBranchId, isErrorResponse, jsonError,
 } from '@/lib/api-helpers';
 
 /**
- * GET /api/services — list services (server-side, used for bulk/admin ops)
- * Normal reads go through Supabase client directly (RLS handles isolation)
+ * GET /api/services — list services
+ *
+ * Hardened:
+ *   - Uses requireActiveProfile for proper auth + activity check
+ *   - Imus-only: when enabled, forces query to IMS branch regardless of query param
+ *   - Branch isolation: non-owners use their profile.branch_id
  */
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createClient();
-    const { data: { user: currentUser } } = await supabase.auth.getUser();
-    if (!currentUser) return jsonError('Unauthorized', 401);
+    const auth = await requireActiveProfile(supabase);
+    if (isErrorResponse(auth)) return auth;
+    const { profile: caller } = auth;
+
+    const adminClient = createAdminClient();
 
     const { searchParams } = new URL(request.url);
-    const branchId = searchParams.get('branch_id');
+    const requestedBranchId = searchParams.get('branch_id');
 
-    let query = supabase.from('services').select('*').order('name');
-    if (branchId) query = query.eq('branch_id', branchId);
+    // Determine effective branch_id
+    let effectiveBranchId: string | null = null;
+
+    // Imus-only: always force IMS branch
+    const imusResult = await resolveImusBranchId(adminClient);
+    if (imusResult instanceof NextResponse) return imusResult;
+
+    if (imusResult !== null) {
+      // IMUS_ONLY is true — force IMS branch, ignore query param
+      effectiveBranchId = imusResult;
+    } else {
+      // Multi-branch mode
+      if (caller.role === 'owner') {
+        // Owners can query any branch or all
+        effectiveBranchId = requestedBranchId;
+      } else {
+        // Non-owners must use their own branch
+        effectiveBranchId = caller.branch_id;
+      }
+    }
+
+    let query = adminClient.from('services').select('*').order('name');
+    if (effectiveBranchId) query = query.eq('branch_id', effectiveBranchId);
 
     const { data, error } = await query;
     if (error) return jsonError(error.message, 500);

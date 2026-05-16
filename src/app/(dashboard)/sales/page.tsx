@@ -272,7 +272,7 @@ export default function SalesPage() {
         body: JSON.stringify({
           amount,
           reason: refundReason,
-          return_inventory: refundReturnInv,
+          return_inventory: false, // Disabled until itemized refund_items UI is built
           refund_type: 'product',
           ...(isManager ? { auditor_pin: auditorPin } : {}),
         }),
@@ -839,13 +839,16 @@ export default function SalesPage() {
             />
           </div>
 
-          <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl border border-brand-200 hover:bg-brand-50 transition-colors">
-            <input type="checkbox" checked={refundReturnInv}
-              onChange={e => setRefundReturnInv(e.target.checked)}
+          {/* TODO: Enable once itemized refund_items UI is built. Currently the UI would
+              send return_inventory: true with an empty refund_items array, which records
+              the refund as "inventory returned" but never actually restores stock. */}
+          <label className="flex items-center gap-3 cursor-not-allowed p-3 rounded-xl border border-brand-200 bg-surface-50 opacity-60">
+            <input type="checkbox" checked={false}
+              disabled
               className="w-4 h-4 accent-brand-600" />
             <div>
               <p className="text-sm font-medium text-brand-800">Return items to inventory</p>
-              <p className="text-xs text-brand-400">Restore product stock for this sale</p>
+              <p className="text-xs text-brand-400">Coming soon — requires itemized refund selection</p>
             </div>
           </label>
 

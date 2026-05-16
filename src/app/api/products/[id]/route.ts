@@ -154,7 +154,8 @@ export async function DELETE(
       .eq('product_id', productId);
 
     if ((usageCount || 0) > 0) {
-      await adminClient.from('products').update({ is_active: false }).eq('id', productId);
+      const { error: softDeleteErr } = await adminClient.from('products').update({ is_active: false }).eq('id', productId);
+      if (softDeleteErr) return jsonError(`Soft delete failed: ${softDeleteErr.message}`, 500);
     } else {
       const { error } = await adminClient.from('products').delete().eq('id', productId);
       if (error) return jsonError(error.message, 500);

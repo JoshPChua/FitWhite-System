@@ -218,12 +218,16 @@ export async function POST(
 
     // ─── Rollback ledger ─────────────────────────────────────
     // Tracks all successful writes so any subsequent failure can undo them.
+    // IMPORTANT: We track individual IDs so rollback never deletes original
+    // sale audit rows — only the rows created by THIS refund operation.
 
     interface StockMutation {
       inventoryId: string;
       quantityBefore: number;
     }
     const stockMutations: StockMutation[] = [];
+    const createdStockAdjIds: string[] = [];
+    const createdInvLogIds: string[] = [];
     let refundId: string | null = null;
     let refundItemsInserted = false;
 
@@ -235,10 +239,12 @@ export async function POST(
             .update({ quantity: m.quantityBefore } as Record<string, unknown>)
             .eq('id', m.inventoryId);
         }
-        // Remove stock adjustments and logs for this refund
-        if (refundId) {
-          await adminClient.from('stock_adjustments').delete().eq('reference_id', saleId);
-          await adminClient.from('inventory_logs').delete().eq('sale_id', saleId);
+        // Remove only the stock adjustments and inventory logs created by THIS refund
+        for (const adjId of createdStockAdjIds) {
+          await adminClient.from('stock_adjustments').delete().eq('id', adjId);
+        }
+        for (const logId of createdInvLogIds) {
+          await adminClient.from('inventory_logs').delete().eq('id', logId);
         }
         // Remove refund items
         if (refundId && refundItemsInserted) {
@@ -332,8 +338,8 @@ export async function POST(
           // Record in ledger for potential rollback
           stockMutations.push({ inventoryId: invRecord.id as string, quantityBefore: oldQty });
 
-          // Legacy stock_adjustments (backward compat)
-          const { error: adjErr } = await adminClient.from('stock_adjustments').insert({
+          // Legacy stock_adjustments (backward compat) — track ID for safe rollback
+          const { data: adjData, error: adjErr } = await adminClient.from('stock_adjustments').insert({
             inventory_id: invRecord.id as string,
             branch_id: sale.branch_id as string,
             user_id: userId,
@@ -341,7 +347,7 @@ export async function POST(
             quantity_change: ri.quantity,
             reason: `Refund on ${sale.receipt_number as string}`,
             reference_id: saleId,
-          } as Record<string, unknown>);
+          } as Record<string, unknown>).select('id').single();
 
           if (adjErr) {
             console.error('stock_adjustments write failed, rolling back:', adjErr.message);
@@ -351,20 +357,21 @@ export async function POST(
               500,
             );
           }
+          createdStockAdjIds.push((adjData as Record<string, unknown>).id as string);
 
-          // Canonical inventory_logs
-          const { error: logErr } = await adminClient.from('inventory_logs').insert({
+          // Canonical inventory_logs — track ID for safe rollback
+          const { data: logData, error: logErr } = await adminClient.from('inventory_logs').insert({
             inventory_id: invRecord.id as string,
             product_id: saleItem.product_id as string,
             branch_id: sale.branch_id as string,
             performed_by: userId,
-            source: 'refund',
+            source: 'refund_return',
             quantity_delta: ri.quantity,
             quantity_before: oldQty,
             quantity_after: newQty,
             sale_id: saleId,
             notes: `Refund inventory restoration — ${sale.receipt_number as string}`,
-          } as Record<string, unknown>);
+          } as Record<string, unknown>).select('id').single();
 
           if (logErr) {
             console.error('inventory_logs write failed, rolling back:', logErr.message);
@@ -374,6 +381,7 @@ export async function POST(
               500,
             );
           }
+          createdInvLogIds.push((logData as Record<string, unknown>).id as string);
         }
       }
     }
