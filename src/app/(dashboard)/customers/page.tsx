@@ -25,6 +25,7 @@ interface Customer {
   referred_by: string | null;
   referred_by_name?: string;
   last_transaction_at: string | null;
+  last_contact_at: string | null;
   created_at: string;
   updated_at: string;
   visit_count?: number;
@@ -65,13 +66,19 @@ function computeStatus(c: Customer): 'new' | 'active' | 'inactive' {
   const now = Date.now();
   const created = new Date(c.created_at).getTime();
   const dayMs = 24 * 60 * 60 * 1000;
-  if (!c.last_transaction_at && now - created < dayMs) return 'new';
-  if (c.last_transaction_at) {
-    const lastTx = new Date(c.last_transaction_at).getTime();
-    if (now - lastTx < 90 * dayMs) return 'active';
-  }
-  if (!c.last_transaction_at && now - created < 90 * dayMs) return 'active';
-  return 'inactive';
+
+  // New Today: created within last 24 hours
+  if (now - created < dayMs) return 'new';
+
+  // Latest activity = max of last_transaction_at, last_contact_at, created_at
+  const lastTx = c.last_transaction_at ? new Date(c.last_transaction_at).getTime() : 0;
+  const lastContact = c.last_contact_at ? new Date(c.last_contact_at).getTime() : 0;
+  const latestActivity = Math.max(lastTx, lastContact, created);
+
+  // Inactive: latest activity older than 90 days
+  if (now - latestActivity >= 90 * dayMs) return 'inactive';
+
+  return 'active';
 }
 
 interface VisitHistoryEntry {
@@ -163,6 +170,7 @@ export default function CustomersPage() {
         source: (c.source as string) || 'walk_in',
         referred_by: c.referred_by as string | null,
         last_transaction_at: c.last_transaction_at as string | null,
+        last_contact_at: c.last_contact_at as string | null,
         created_at: c.created_at as string,
         updated_at: c.updated_at as string,
       })));
@@ -879,6 +887,9 @@ export default function CustomersPage() {
               )}
               {detailCustomer.last_transaction_at && (
                 <div><p className="text-xs text-brand-400 mb-0.5">Last Transaction</p><p className="text-sm text-brand-800">{formatDate(detailCustomer.last_transaction_at)}</p></div>
+              )}
+              {detailCustomer.last_contact_at && (
+                <div><p className="text-xs text-brand-400 mb-0.5">Last Contact</p><p className="text-sm text-brand-800">{formatDate(detailCustomer.last_contact_at)}</p></div>
               )}
               {detailCustomer.allergies && (
                 <div className="col-span-2">

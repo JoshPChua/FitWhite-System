@@ -36,6 +36,8 @@ interface PackageSession {
   created_at: string;
   performer_name: string;
   doctor_name: string | null;
+  is_voided: boolean;
+  void_reason: string | null;
 }
 
 interface PackagePayment {
@@ -83,6 +85,15 @@ export default function PackagesPage() {
 
   const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [formError, setFormError] = useState('');
+
+  // Correction state
+  const [voidingSessionId, setVoidingSessionId] = useState<string | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidSubmitting, setVoidSubmitting] = useState(false);
+  const [showAdjustTotal, setShowAdjustTotal] = useState(false);
+  const [adjustTotalValue, setAdjustTotalValue] = useState('');
+  const [adjustTotalReason, setAdjustTotalReason] = useState('');
+  const [adjustSubmitting, setAdjustSubmitting] = useState(false);
 
   const supabase = createClient();
 
@@ -176,6 +187,8 @@ export default function PackagesPage() {
         doctor_name: s.doctor
           ? (s.doctor as Record<string, unknown>).full_name as string
           : null,
+        is_voided: s.is_voided as boolean || false,
+        void_reason: s.void_reason as string | null || null,
       })));
 
       setPkgPayments((payData.data || []).map((p: Record<string, unknown>) => ({
@@ -502,7 +515,70 @@ export default function PackagesPage() {
 
             {/* Session History */}
             <div>
-              <h3 className="text-sm font-semibold text-brand-800 mb-2">Session History</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-brand-800">Session History</h3>
+                {canManage && selectedPkg?.status === 'active' && (
+                  <button
+                    onClick={() => {
+                      setShowAdjustTotal(true);
+                      setAdjustTotalValue(String(selectedPkg?.total_sessions || ''));
+                      setAdjustTotalReason('');
+                    }}
+                    className="text-xs text-brand-500 hover:text-brand-700 font-medium transition-colors"
+                  >
+                    ✏️ Edit Total
+                  </button>
+                )}
+              </div>
+
+              {/* Adjust Total Sessions inline form */}
+              {showAdjustTotal && selectedPkg && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-2 space-y-2">
+                  <p className="text-xs font-semibold text-amber-800">Adjust Total Sessions</p>
+                  <input
+                    type="number" min={1} value={adjustTotalValue}
+                    onChange={e => setAdjustTotalValue(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-amber-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-400/50"
+                    placeholder="New total sessions"
+                  />
+                  <input
+                    type="text" value={adjustTotalReason}
+                    onChange={e => setAdjustTotalReason(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg border border-amber-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-amber-400/50"
+                    placeholder="Reason for adjustment (required)"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      disabled={adjustSubmitting || !adjustTotalReason.trim()}
+                      onClick={async () => {
+                        setAdjustSubmitting(true);
+                        try {
+                          const res = await fetch(`/api/packages/${selectedPkg.id}/correct`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              action: 'adjust_total',
+                              new_total: parseInt(adjustTotalValue, 10),
+                              reason: adjustTotalReason.trim(),
+                            }),
+                          });
+                          const result = await res.json();
+                          if (!res.ok) { setFormError(result.error || 'Adjustment failed'); return; }
+                          setShowAdjustTotal(false);
+                          await refreshDetailAfterWrite(selectedPkg!.id);
+                        } catch { setFormError('Network error'); } finally { setAdjustSubmitting(false); }
+                      }}
+                      className="flex-1 py-1.5 rounded-lg bg-amber-600 text-white text-xs font-medium hover:bg-amber-700 transition-colors disabled:opacity-50"
+                    >
+                      {adjustSubmitting ? 'Saving...' : 'Save'}
+                    </button>
+                    <button onClick={() => setShowAdjustTotal(false)} className="px-3 py-1.5 rounded-lg border border-amber-300 text-amber-700 text-xs font-medium hover:bg-amber-100 transition-colors">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {loadingDetail ? (
                 <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 w-full rounded-xl" />)}</div>
               ) : sessions.length === 0 ? (
@@ -510,14 +586,67 @@ export default function PackagesPage() {
               ) : (
                 <div className="space-y-2 max-h-48 overflow-y-auto">
                   {sessions.map((s, i) => (
-                    <div key={s.id} className="flex items-center justify-between bg-surface-50 rounded-xl px-4 py-3">
-                      <div>
-                        <p className="text-sm font-medium text-brand-800">Session #{sessions.length - i}</p>
+                    <div key={s.id} className={`flex items-center justify-between rounded-xl px-4 py-3 ${
+                      s.is_voided ? 'bg-rose-50/50 opacity-60' : 'bg-surface-50'
+                    }`}>
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-sm font-medium ${s.is_voided ? 'text-rose-400 line-through' : 'text-brand-800'}`}>
+                          Session #{sessions.length - i}
+                          {s.is_voided && <span className="text-xs text-rose-500 ml-1 no-underline">(Voided)</span>}
+                        </p>
                         <p className="text-xs text-brand-400">{formatDate(s.created_at)} · by {s.performer_name}</p>
                         {s.doctor_name && <p className="text-xs text-brand-500">Dr. {s.doctor_name}</p>}
                         {s.notes && <p className="text-xs text-brand-400 italic mt-0.5">{s.notes}</p>}
+                        {s.is_voided && s.void_reason && <p className="text-xs text-rose-500 mt-0.5">Reason: {s.void_reason}</p>}
                       </div>
-                      <Badge variant="brand" size="sm">×{s.sessions_count}</Badge>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <Badge variant={s.is_voided ? 'danger' : 'brand'} size="sm">×{s.sessions_count}</Badge>
+                        {canManage && !s.is_voided && (
+                          voidingSessionId === s.id ? (
+                            <div className="flex flex-col gap-1 ml-2">
+                              <input
+                                type="text" value={voidReason} onChange={e => setVoidReason(e.target.value)}
+                                placeholder="Reason..." autoFocus
+                                className="w-28 px-2 py-1 rounded border border-rose-300 text-xs focus:outline-none focus:ring-1 focus:ring-rose-400"
+                              />
+                              <div className="flex gap-1">
+                                <button
+                                  disabled={voidSubmitting || !voidReason.trim()}
+                                  onClick={async () => {
+                                    setVoidSubmitting(true);
+                                    try {
+                                      const res = await fetch(`/api/packages/${selectedPkg?.id}/correct`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ action: 'void_session', session_id: s.id, reason: voidReason.trim() }),
+                                      });
+                                      const result = await res.json();
+                                      if (!res.ok) { setFormError(result.error || 'Void failed'); return; }
+                                      setVoidingSessionId(null);
+                                      setVoidReason('');
+                                      await refreshDetailAfterWrite(selectedPkg!.id);
+                                    } catch { setFormError('Network error'); } finally { setVoidSubmitting(false); }
+                                  }}
+                                  className="px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] font-medium disabled:opacity-50"
+                                >
+                                  {voidSubmitting ? '...' : 'Void'}
+                                </button>
+                                <button onClick={() => { setVoidingSessionId(null); setVoidReason(''); }} className="px-2 py-0.5 rounded border border-brand-200 text-brand-500 text-[10px]">
+                                  ✕
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => { setVoidingSessionId(s.id); setVoidReason(''); }}
+                              className="text-xs text-rose-400 hover:text-rose-600 font-medium transition-colors"
+                              title="Void this session"
+                            >
+                              Void
+                            </button>
+                          )
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
