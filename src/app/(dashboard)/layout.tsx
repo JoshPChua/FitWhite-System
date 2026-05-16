@@ -1,10 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useAuth } from '@/providers/auth-provider';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
-import { PageSkeleton } from '@/components/ui/skeleton';
 
 // Maximum ms we'll show the loader before giving up and rendering anyway.
 // Prevents the "stuck on loading" UX even if bootstrap never resolves.
@@ -13,22 +12,22 @@ const LOADING_TIMEOUT_MS = 5000;
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { isLoading } = useAuth();
   const [timedOut, setTimedOut] = useState(false);
+  const timedOutRef = useRef(false);
 
   // Safety valve: if auth hasn't resolved in 5 s, render the shell anyway
   useEffect(() => {
     if (!isLoading) {
-      setTimedOut(false);
+      timedOutRef.current = false;
       return;
     }
     const t = setTimeout(() => {
       // Auth bootstrap did not complete within the timeout.
-      // This can indicate a Supabase connectivity issue or an auth regression.
-      // The shell is rendered anyway to avoid the user being stuck on a spinner.
       console.error(
         '[DashboardLayout] Auth bootstrap timed out after',
         LOADING_TIMEOUT_MS,
         'ms — rendering shell without auth data. Check Supabase connectivity and auth-provider logs.'
       );
+      timedOutRef.current = true;
       setTimedOut(true);
     }, LOADING_TIMEOUT_MS);
     return () => clearTimeout(t);

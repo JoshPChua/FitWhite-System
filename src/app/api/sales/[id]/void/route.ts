@@ -54,7 +54,7 @@ export async function POST(
         return NextResponse.json({ error: 'Auditor PIN required for void approval' }, { status: 400 });
       }
 
-      const pinResult = await verifyAuditorPin(adminClient, auditor_pin);
+      const pinResult = await verifyAuditorPin(adminClient, auditor_pin, caller.branch_id || undefined);
 
       if (!pinResult.valid) {
         return NextResponse.json(

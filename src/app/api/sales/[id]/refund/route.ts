@@ -81,7 +81,7 @@ export async function POST(
         return jsonError('Auditor PIN required for refund approval', 400);
       }
 
-      const pinResult = await verifyAuditorPin(adminClient, auditor_pin);
+      const pinResult = await verifyAuditorPin(adminClient, auditor_pin, caller.branch_id || undefined);
 
       if (!pinResult.valid) {
         return jsonError(pinResult.error || 'Invalid auditor PIN', pinResult.status || 403);

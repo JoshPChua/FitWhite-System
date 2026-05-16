@@ -25,28 +25,38 @@ export interface AuditorPinResult {
 }
 
 /**
- * Verifies an auditor PIN against all active auditors in the database.
+ * Verifies an auditor PIN against active auditors in the database.
  *
  * @param adminClient - Supabase admin client (service_role)
  * @param pin - The 6-digit PIN to verify
+ * @param branchId - Optional branch to scope auditor lookup.
+ *                   When provided, only auditors in that branch are checked.
+ *                   When omitted, all active auditors are checked (Imus-only safe).
  * @returns AuditorPinResult with validation outcome
  */
 export async function verifyAuditorPin(
   adminClient: SupabaseClient,
   pin: string,
+  branchId?: string,
 ): Promise<AuditorPinResult> {
   // 1. Format check
   if (!pin || !isValidPinFormat(pin)) {
     return { valid: false, error: 'PIN must be exactly 6 digits', status: 400 };
   }
 
-  // 2. Fetch all active auditors with PINs
-  const { data: auditors, error: fetchErr } = await adminClient
+  // 2. Fetch active auditors with PINs (optionally scoped to branch)
+  let query = adminClient
     .from('profiles')
     .select('id, first_name, last_name, auditor_pin, pin_failed_attempts, pin_locked_until')
     .eq('role', 'auditor')
     .eq('is_active', true)
     .not('auditor_pin', 'is', null);
+
+  if (branchId) {
+    query = query.eq('branch_id', branchId);
+  }
+
+  const { data: auditors, error: fetchErr } = await query;
 
   if (fetchErr || !auditors || auditors.length === 0) {
     return {

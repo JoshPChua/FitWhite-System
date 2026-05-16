@@ -229,8 +229,26 @@ export default function PackagesPage() {
 
   const handleRecordVisit = async () => {
     if (!selectedPkg) return;
-    setVisitSubmitting(true);
     setFormError('');
+
+    // ─── Strict input validation (reject non-integers) ───
+    const rawSessions = visitForm.sessions_count.trim();
+    if (!rawSessions || !/^\d+$/.test(rawSessions)) {
+      setFormError('Sessions count must be a positive whole number (e.g. 1, 2, 3).');
+      return;
+    }
+    const sessionsCount = Number(rawSessions);
+    if (sessionsCount < 1) {
+      setFormError('Sessions count must be at least 1.');
+      return;
+    }
+    const remaining = selectedPkg.total_sessions - selectedPkg.sessions_used;
+    if (sessionsCount > remaining) {
+      setFormError(`Cannot consume ${sessionsCount} sessions — only ${remaining} remaining.`);
+      return;
+    }
+
+    setVisitSubmitting(true);
     try {
       const paymentAmount = visitMode === 'session_payment' ? (parseFloat(visitForm.payment_amount) || 0) : 0;
 
@@ -238,7 +256,7 @@ export default function PackagesPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          sessions_count: parseInt(visitForm.sessions_count) || 1,
+          sessions_count: sessionsCount,
           doctor_id: visitForm.doctor_id || null,
           notes: visitForm.notes || null,
           payment_amount: paymentAmount,
@@ -552,6 +570,22 @@ export default function PackagesPage() {
                     <button
                       disabled={adjustSubmitting || !adjustTotalReason.trim()}
                       onClick={async () => {
+                        setFormError('');
+                        // ─── Strict validation for adjust total ───
+                        const rawTotal = adjustTotalValue.trim();
+                        if (!rawTotal || !/^\d+$/.test(rawTotal)) {
+                          setFormError('New total must be a positive whole number (e.g. 1, 5, 10).');
+                          return;
+                        }
+                        const newTotal = Number(rawTotal);
+                        if (newTotal < 1) {
+                          setFormError('New total must be at least 1.');
+                          return;
+                        }
+                        if (selectedPkg && newTotal < selectedPkg.sessions_used) {
+                          setFormError(`Cannot set total below ${selectedPkg.sessions_used} — that many sessions are already used.`);
+                          return;
+                        }
                         setAdjustSubmitting(true);
                         try {
                           const res = await fetch(`/api/packages/${selectedPkg.id}/correct`, {
@@ -559,7 +593,7 @@ export default function PackagesPage() {
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                               action: 'adjust_total',
-                              new_total: parseInt(adjustTotalValue, 10),
+                              new_total: newTotal,
                               reason: adjustTotalReason.trim(),
                             }),
                           });

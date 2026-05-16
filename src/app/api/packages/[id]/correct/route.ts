@@ -92,7 +92,7 @@ export async function POST(
           return jsonError('Auditor PIN is required for void approval', 400);
         }
 
-        const pinResult = await verifyAuditorPin(adminClient, auditor_pin);
+        const pinResult = await verifyAuditorPin(adminClient, auditor_pin, branchId);
 
         if (!pinResult.valid) {
           return jsonError(pinResult.error || 'Invalid auditor PIN', pinResult.status || 403);
@@ -127,8 +127,8 @@ export async function POST(
         return jsonError('Only owners and managers can adjust total sessions', 403);
       }
 
-      if (typeof new_total !== 'number' || !Number.isFinite(new_total) || new_total < 1) {
-        return jsonError('new_total must be a positive integer', 400);
+      if (typeof new_total !== 'number' || !Number.isFinite(new_total) || !Number.isInteger(new_total) || new_total < 1) {
+        return jsonError('new_total must be a positive integer (no decimals)', 400);
       }
 
       // Recalculate current non-voided sessions_used from DB
