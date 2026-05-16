@@ -408,13 +408,23 @@ export default function ReportsPage() {
     let q = supabase
       .from('sales')
       .select('id, receipt_number, total, subtotal, discount, status, created_at, branches:branch_id(name), profiles:user_id(first_name, last_name), customers:customer_id(first_name, last_name)')
-      .in('status', ['completed', 'partial_refund'])
       .order('created_at', { ascending: false });
     if (branchFilter) q = q.eq('branch_id', branchFilter);
     if (dateFrom) q = q.gte('created_at', dateFrom);
     if (dateTo) q = q.lte('created_at', dateTo);
     const { data: salesData } = await q;
     if (!salesData || salesData.length === 0) { alert('No sales data to export'); return; }
+
+    // Also fetch refunds for this period
+    let rq = supabase.from('refunds').select('sale_id, amount, reason, created_at');
+    if (branchFilter) rq = rq.eq('branch_id', branchFilter);
+    if (dateFrom) rq = rq.gte('created_at', dateFrom);
+    if (dateTo) rq = rq.lte('created_at', dateTo);
+    const { data: refundsData } = await rq;
+    const refundMap = new Map<string, { amount: number; reason: string }>();
+    for (const r of (refundsData || []) as Record<string, unknown>[]) {
+      refundMap.set(r.sale_id as string, { amount: Number(r.amount), reason: r.reason as string || '' });
+    }
 
     // Fetch payments for these sales
     const saleIds = (salesData as Record<string, unknown>[]).map(s => s.id as string).slice(0, 1000);
@@ -425,18 +435,26 @@ export default function ReportsPage() {
       payMap.set(p.sale_id as string, existing ? `${existing}, ${p.method}` : p.method as string);
     }
 
-    type SaleRow = { receipt: string; customer: string; cashier: string; total: string; discount: string; payment_methods: string; status: string; date: string; branch: string };
-    const rows: SaleRow[] = (salesData as Record<string, unknown>[]).map(s => ({
-      receipt: s.receipt_number as string,
-      customer: s.customers ? `${(s.customers as Record<string, unknown>).first_name} ${(s.customers as Record<string, unknown>).last_name}` : 'Walk-in',
-      cashier: s.profiles ? `${(s.profiles as Record<string, unknown>).first_name} ${(s.profiles as Record<string, unknown>).last_name}` : '',
-      total: csvCurrency(Number(s.total)),
-      discount: csvCurrency(Number(s.discount)),
-      payment_methods: payMap.get(s.id as string) || '',
-      status: s.status as string,
-      date: csvDate(s.created_at as string),
-      branch: (s.branches as Record<string, unknown>)?.name as string || '',
-    }));
+    const statusLabel: Record<string, string> = { completed: 'Completed', voided: 'Voided', refunded: 'Refunded', partial_refund: 'Partial Refund' };
+
+    type SaleRow = { receipt: string; customer: string; cashier: string; total: string; discount: string; payment_methods: string; status: string; refund_amount: string; refund_reason: string; date: string; branch: string };
+    const rows: SaleRow[] = (salesData as Record<string, unknown>[]).map(s => {
+      const refund = refundMap.get(s.id as string);
+      return {
+        receipt: s.receipt_number as string,
+        customer: s.customers ? `${(s.customers as Record<string, unknown>).first_name} ${(s.customers as Record<string, unknown>).last_name}` : 'Walk-in',
+        cashier: s.profiles ? `${(s.profiles as Record<string, unknown>).first_name} ${(s.profiles as Record<string, unknown>).last_name}` : '',
+        total: csvCurrency(Number(s.total)),
+        discount: csvCurrency(Number(s.discount)),
+        payment_methods: payMap.get(s.id as string) || '',
+        status: statusLabel[s.status as string] || (s.status as string),
+        refund_amount: refund ? csvCurrency(refund.amount) : '',
+        refund_reason: refund ? refund.reason : '',
+        date: csvDate(s.created_at as string),
+        branch: (s.branches as Record<string, unknown>)?.name as string || '',
+      };
+    });
+
     const columns: CsvColumn<SaleRow>[] = [
       { header: 'Date & Time', accessor: r => r.date },
       { header: 'Receipt No.', accessor: r => r.receipt },
@@ -446,9 +464,29 @@ export default function ReportsPage() {
       { header: 'Discount (PHP)', accessor: r => r.discount },
       { header: 'Payment Method(s)', accessor: r => r.payment_methods },
       { header: 'Sale Status', accessor: r => r.status },
+      { header: 'Refund Amount (PHP)', accessor: r => r.refund_amount },
+      { header: 'Refund Reason', accessor: r => r.refund_reason },
       { header: 'Branch', accessor: r => r.branch },
     ];
-    downloadCsv(csvHeader('Daily Sales Detail Report') + toCsv(rows, columns), `daily-sales-detail-${filterPeriod}.csv`);
+
+    // Calculate totals
+    const allSales = salesData as Record<string, unknown>[];
+    const totalCompleted = allSales.filter(s => s.status === 'completed' || s.status === 'partial_refund').reduce((sum, s) => sum + Number(s.total), 0);
+    const totalVoided = allSales.filter(s => s.status === 'voided').reduce((sum, s) => sum + Number(s.total), 0);
+    const totalRefunded = (refundsData || []).reduce((sum: number, r: Record<string, unknown>) => sum + Number(r.amount), 0);
+    const netRevenue = totalCompleted - totalRefunded;
+
+    const summaryRows = [
+      '',
+      `"SUMMARY"`,
+      `"Total Sales (Completed + Partial Refund)","${csvCurrency(totalCompleted)}"`,
+      `"Total Voided","${csvCurrency(totalVoided)}"`,
+      `"Total Refunded","${csvCurrency(totalRefunded)}"`,
+      `"Net Revenue (Sales - Refunds)","${csvCurrency(netRevenue)}"`,
+      `"Total Transactions","${allSales.length}"`,
+    ].join('\n');
+
+    downloadCsv(csvHeader('Daily Sales Detail Report') + toCsv(rows, columns) + '\n' + summaryRows, `daily-sales-detail-${filterPeriod}.csv`);
   };
 
   // ─── NEW: Cash Movement CSV ────────────────────────────────
@@ -544,12 +582,14 @@ export default function ReportsPage() {
     const { data: ppData } = await q;
     if (!ppData || ppData.length === 0) { alert('No installment payments to export'); return; }
 
-    type InstRow = { date: string; customer: string; service: string; amount: string; method: string; reference: string; receiver: string; pkg_total: string; pkg_paid: string; pkg_balance: string; sessions: string };
+    type InstRow = { date: string; customer: string; service: string; amount: string; method: string; reference: string; receiver: string; pkg_total: string; pkg_paid: string; pkg_balance: string; total_sessions: string; sessions_used: string; sessions_remaining: string; pkg_status: string };
     const rows: InstRow[] = (ppData as Record<string, unknown>[]).map(p => {
       const pkg = p.package as Record<string, unknown> | null;
       const svc = pkg?.services as Record<string, unknown> | null;
       const cust = pkg?.customers as Record<string, unknown> | null;
       const rcv = p.receiver as Record<string, unknown> | null;
+      const totalSessions = Number(pkg?.total_sessions || 0);
+      const sessionsUsed = Number(pkg?.sessions_used || 0);
       return {
         date: csvDate(p.created_at as string),
         customer: cust ? `${cust.first_name} ${cust.last_name}` : 'Unknown',
@@ -561,7 +601,10 @@ export default function ReportsPage() {
         pkg_total: pkg ? csvCurrency(Number(pkg.total_price)) : '',
         pkg_paid: pkg ? csvCurrency(Number(pkg.total_paid)) : '',
         pkg_balance: pkg ? csvCurrency(Number(pkg.remaining_balance)) : '',
-        sessions: pkg ? `${pkg.sessions_used}/${pkg.total_sessions}` : '',
+        total_sessions: String(totalSessions),
+        sessions_used: String(sessionsUsed),
+        sessions_remaining: String(Math.max(0, totalSessions - sessionsUsed)),
+        pkg_status: totalSessions > 0 && sessionsUsed >= totalSessions ? 'Completed' : 'Active',
       };
     });
     const columns: CsvColumn<InstRow>[] = [
@@ -575,7 +618,10 @@ export default function ReportsPage() {
       { header: 'Package Total (PHP)', accessor: r => r.pkg_total },
       { header: 'Total Paid (PHP)', accessor: r => r.pkg_paid },
       { header: 'Remaining Balance (PHP)', accessor: r => r.pkg_balance },
-      { header: 'Sessions Used', accessor: r => r.sessions },
+      { header: 'Total Sessions', accessor: r => r.total_sessions },
+      { header: 'Sessions Used', accessor: r => r.sessions_used },
+      { header: 'Sessions Remaining', accessor: r => r.sessions_remaining },
+      { header: 'Package Status', accessor: r => r.pkg_status },
     ];
     downloadCsv(csvHeader('Installment Payments Detail Report') + toCsv(rows, columns), `installment-payments-${filterPeriod}.csv`);
   };

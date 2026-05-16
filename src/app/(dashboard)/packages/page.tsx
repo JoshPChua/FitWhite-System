@@ -580,6 +580,14 @@ export default function PackagesPage() {
                 </div>
               )}
 
+              {/* Error banner for void/adjust operations */}
+              {formError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-xl text-sm flex items-center justify-between">
+                  <span>{formError}</span>
+                  <button onClick={() => setFormError('')} className="text-red-400 hover:text-red-600 ml-2 text-xs">✕</button>
+                </div>
+              )}
+
               {loadingDetail ? (
                 <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 w-full rounded-xl" />)}</div>
               ) : sessions.length === 0 ? (
