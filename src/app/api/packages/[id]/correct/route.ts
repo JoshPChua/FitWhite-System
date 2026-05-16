@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import {
   requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
 } from '@/lib/api-helpers';
+import { verifyAuditorPin } from '@/lib/verify-auditor-pin';
 
 /**
  * POST /api/packages/[id]/correct
@@ -13,7 +14,7 @@ import {
  * 1. Void a session: { action: 'void_session', session_id, reason, auditor_pin? }
  *    - Calls void_package_session RPC (atomic cascade: session + sale + payment + BOM)
  *    - Owner can void without PIN
- *    - Manager/cashier must provide auditor_pin (verified against profiles.auditor_pin)
+ *    - Manager/cashier must provide auditor_pin (verified via hashed comparison)
  *
  * 2. Adjust total sessions: { action: 'adjust_total', new_total, reason }
  *    - Validates new_total >= current non-voided sessions_used
@@ -85,25 +86,16 @@ export async function POST(
         return jsonError('session_id is required for void_session', 400);
       }
 
-      // PIN verification for non-owners
+      // PIN verification for non-owners (uses hashed comparison + lockout)
       if (caller.role !== 'owner') {
         if (!auditor_pin) {
           return jsonError('Auditor PIN is required for void approval', 400);
         }
 
-        // Find any auditor in this branch and verify their PIN
-        const { data: auditors } = await adminClient
-          .from('profiles')
-          .select('id, auditor_pin')
-          .eq('role', 'auditor')
-          .not('auditor_pin', 'is', null);
+        const pinResult = await verifyAuditorPin(adminClient, auditor_pin);
 
-        const pinMatch = (auditors || []).some(
-          (a: Record<string, unknown>) => a.auditor_pin === auditor_pin
-        );
-
-        if (!pinMatch) {
-          return jsonError('Invalid auditor PIN', 403);
+        if (!pinResult.valid) {
+          return jsonError(pinResult.error || 'Invalid auditor PIN', pinResult.status || 403);
         }
       }
 

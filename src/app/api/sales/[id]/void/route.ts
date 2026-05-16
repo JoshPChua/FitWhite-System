@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { verifyPin, isValidPinFormat, MAX_PIN_ATTEMPTS } from '@/lib/auditor-pin';
 import type { Profile } from '@/types/database';
+import { verifyAuditorPin } from '@/lib/verify-auditor-pin';
 
 /**
  * POST /api/sales/[id]/void
@@ -53,53 +53,17 @@ export async function POST(
       if (!auditor_pin) {
         return NextResponse.json({ error: 'Auditor PIN required for void approval' }, { status: 400 });
       }
-      if (!isValidPinFormat(auditor_pin)) {
-        return NextResponse.json({ error: 'PIN must be exactly 6 digits' }, { status: 400 });
+
+      const pinResult = await verifyAuditorPin(adminClient, auditor_pin);
+
+      if (!pinResult.valid) {
+        return NextResponse.json(
+          { error: pinResult.error || 'Invalid auditor PIN', locked: pinResult.locked },
+          { status: pinResult.status || 403 },
+        );
       }
 
-      // Fetch active auditors
-      const { data: auditors } = await adminClient
-        .from('profiles')
-        .select('id, first_name, last_name, auditor_pin, pin_failed_attempts, pin_locked_until')
-        .eq('role', 'auditor')
-        .eq('is_active', true)
-        .not('auditor_pin', 'is', null);
-
-      if (!auditors || auditors.length === 0) {
-        return NextResponse.json({ error: 'No auditors configured. Contact the owner to set up an auditor account.' }, { status: 400 });
-      }
-
-      const now = new Date();
-      let pinValid = false;
-
-      for (const auditor of auditors as Record<string, unknown>[]) {
-        const lockedUntil = auditor.pin_locked_until ? new Date(auditor.pin_locked_until as string) : null;
-        if (lockedUntil && lockedUntil > now) continue; // skip locked auditor
-
-        const isValid = await verifyPin(auditor_pin, auditor.auditor_pin as string);
-        if (isValid) {
-          approvedByAuditorId = auditor.id as string;
-          pinValid = true;
-          // Reset failed attempts
-          await adminClient.from('profiles')
-            .update({ pin_failed_attempts: 0, pin_locked_until: null } as Record<string, unknown>)
-            .eq('id', auditor.id as string);
-          break;
-        }
-      }
-
-      if (!pinValid) {
-        // Increment failed attempts
-        for (const auditor of auditors as Record<string, unknown>[]) {
-          const failed = ((auditor.pin_failed_attempts as number) || 0) + 1;
-          const update: Record<string, unknown> = { pin_failed_attempts: failed };
-          if (failed >= MAX_PIN_ATTEMPTS) {
-            update.pin_locked_until = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
-          }
-          await adminClient.from('profiles').update(update).eq('id', auditor.id as string);
-        }
-        return NextResponse.json({ error: 'Invalid auditor PIN' }, { status: 403 });
-      }
+      approvedByAuditorId = pinResult.auditor_id || null;
     }
 
 

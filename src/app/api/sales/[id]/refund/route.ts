@@ -4,8 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 import {
   requireActiveProfile, enforceImusOnly, isErrorResponse, jsonError,
 } from '@/lib/api-helpers';
-import { verifyPin, isValidPinFormat, MAX_PIN_ATTEMPTS } from '@/lib/auditor-pin';
-import type { Profile } from '@/types/database';
+import { verifyAuditorPin } from '@/lib/verify-auditor-pin';
 
 /**
  * POST /api/sales/[id]/refund
@@ -81,50 +80,14 @@ export async function POST(
       if (!auditor_pin) {
         return jsonError('Auditor PIN required for refund approval', 400);
       }
-      if (!isValidPinFormat(auditor_pin)) {
-        return jsonError('PIN must be exactly 6 digits', 400);
+
+      const pinResult = await verifyAuditorPin(adminClient, auditor_pin);
+
+      if (!pinResult.valid) {
+        return jsonError(pinResult.error || 'Invalid auditor PIN', pinResult.status || 403);
       }
 
-      const { data: auditors } = await adminClient
-        .from('profiles')
-        .select('id, first_name, last_name, auditor_pin, pin_failed_attempts, pin_locked_until')
-        .eq('role', 'auditor')
-        .eq('is_active', true)
-        .not('auditor_pin', 'is', null);
-
-      if (!auditors || auditors.length === 0) {
-        return jsonError('No auditors configured. Contact the owner.', 400);
-      }
-
-      const now = new Date();
-      let pinValid = false;
-
-      for (const auditor of auditors as Record<string, unknown>[]) {
-        const lockedUntil = auditor.pin_locked_until ? new Date(auditor.pin_locked_until as string) : null;
-        if (lockedUntil && lockedUntil > now) continue;
-
-        const isValid = await verifyPin(auditor_pin, auditor.auditor_pin as string);
-        if (isValid) {
-          approvedByAuditorId = auditor.id as string;
-          pinValid = true;
-          await adminClient.from('profiles')
-            .update({ pin_failed_attempts: 0, pin_locked_until: null } as Record<string, unknown>)
-            .eq('id', auditor.id as string);
-          break;
-        }
-      }
-
-      if (!pinValid) {
-        for (const auditor of auditors as Record<string, unknown>[]) {
-          const failed = ((auditor.pin_failed_attempts as number) || 0) + 1;
-          const update: Record<string, unknown> = { pin_failed_attempts: failed };
-          if (failed >= MAX_PIN_ATTEMPTS) {
-            update.pin_locked_until = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
-          }
-          await adminClient.from('profiles').update(update).eq('id', auditor.id as string);
-        }
-        return jsonError('Invalid auditor PIN', 403);
-      }
+      approvedByAuditorId = pinResult.auditor_id || null;
     }
 
     // ─── Imus-only guard ─────────────────────────────────────

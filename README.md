@@ -331,6 +331,7 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `015_customer_lifecycle_session_accuracy.sql` | Customer lifecycle triggers + session soft-void support |
 | `016_category_tables.sql` | Normalised category tables with expression unique indices, backfill from text columns |
 | `017_void_cascade_treatment_history.sql` | Atomic void RPC (cascade to sale/payment/BOM), treatment_history in visit RPC |
+| `018_fix_package_payment_delete_sync.sql` | Fix total_paid trigger for DELETE, auditor RLS on package tables, harden visit RPC validation |
 
 ### Seed Files
 
