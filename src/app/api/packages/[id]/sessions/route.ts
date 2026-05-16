@@ -10,13 +10,22 @@ const VALID_PAYMENT_METHODS = ['cash', 'gcash', 'card', 'bank_transfer'] as cons
 /**
  * POST /api/packages/[id]/sessions
  *
- * Combined "Record Visit" endpoint:
- *   1. Consumes session(s) from a patient package via atomic Postgres RPC
- *   2. Optionally records an installment payment (if payment_amount > 0)
- *      - Creates a proper sale record with receipt number (visible in Sales page)
- *      - Creates sale_items entry for the service
- *      - Creates payment entry
- *      - Updates package_payments ledger + package totals
+ * Combined "Record Visit" endpoint — **fully atomic**.
+ *
+ * ALL writes (session, BOM, commission, sale, sale_items, payment,
+ * package_payment) happen inside a single Postgres RPC transaction
+ * (`record_package_visit`). If any step fails, the entire transaction
+ * rolls back — no session is consumed, no payment is recorded.
+ *
+ * The RPC validates everything before writing:
+ *   - Package status must be 'active'
+ *   - Branch must match
+ *   - Sufficient sessions remaining
+ *   - Sufficient BOM stock
+ *   - Payment does not exceed remaining balance
+ *
+ * remaining_balance is a GENERATED ALWAYS column and is never manually updated.
+ * total_paid is synced by the package_payments insert trigger inside the RPC.
  *
  * Body: {
  *   sessions_count?: number,       // default 1
@@ -55,7 +64,7 @@ export async function POST(
       reference_number?: string | null;
     };
 
-    // ─── Input validation ────────────────────────────────────
+    // ─── Input validation (app-level, before hitting DB) ─────
     if (typeof sessions_count !== 'number' || !Number.isFinite(sessions_count) || !Number.isInteger(sessions_count) || sessions_count < 1) {
       return jsonError('sessions_count must be a finite integer >= 1', 400);
     }
@@ -70,10 +79,10 @@ export async function POST(
 
     const adminClient = createAdminClient();
 
-    // Fetch the package with full details for payment processing
+    // ─── Fetch package for branch guard + service name ────────
     const { data: pkg } = await adminClient
       .from('patient_packages')
-      .select('*, services:service_id(name), customers:customer_id(first_name, last_name)')
+      .select('branch_id, customer_id, services:service_id(name), customers:customer_id(first_name, last_name)')
       .eq('id', packageId)
       .single();
 
@@ -88,51 +97,19 @@ export async function POST(
     const imusGuard = await enforceImusOnly(adminClient, branchId);
     if (imusGuard) return imusGuard;
 
-    // Branch isolation
+    // Branch isolation (app-level, RPC also validates)
     if (caller.role !== 'owner' && caller.branch_id !== branchId) {
       return jsonError('Cannot consume sessions for another branch', 403);
     }
 
-    // ─── 1. Consume Session(s) via Atomic RPC ───────────────────
-    const { data: result, error: rpcError } = await adminClient
-      .rpc('consume_package_session', {
-        p_package_id: packageId,
-        p_branch_id: branchId,
-        p_performed_by: userId,
-        p_doctor_id: doctor_id || null,
-        p_sessions_count: sessions_count,
-        p_notes: notes || null,
-      });
+    // ─── Generate receipt number (if payment) ────────────────
+    let receiptNumber: string | null = null;
 
-    if (rpcError) {
-      return jsonError(rpcError.message, 500);
-    }
-
-    const rpcResult = result as Record<string, unknown>;
-    let saleRecord: Record<string, unknown> | null = null;
-
-    // ─── 2. Installment Payment (if amount > 0) ────────────────
     if (payment_amount > 0) {
-      const serviceName = (pkgData.services as Record<string, unknown>)?.name as string || 'Package Service';
-      const customerName = pkgData.customers
-        ? `${(pkgData.customers as Record<string, unknown>).first_name} ${(pkgData.customers as Record<string, unknown>).last_name}`
-        : 'Walk-in';
-
-      // App-level over-payment guard
-      const remainingBalance = Number(pkgData.total_price) - Number(pkgData.total_paid);
-      if (payment_amount > remainingBalance + 0.01) {
-        return jsonError(
-          `Payment exceeds remaining balance. Balance: ₱${remainingBalance.toFixed(2)}, Payment: ₱${payment_amount.toFixed(2)}`,
-          400,
-        );
-      }
-
-      // Generate receipt number
       const { data: branchInfo } = await adminClient
         .from('branches').select('code').eq('id', branchId).single();
       const branchCode = branchInfo ? (branchInfo as Record<string, unknown>).code as string : 'FW';
 
-      let receiptNumber = '';
       const { data: receiptData, error: receiptErr } = await adminClient
         .rpc('generate_receipt_number', { branch_code: branchCode });
 
@@ -144,119 +121,51 @@ export async function POST(
       } else {
         receiptNumber = receiptData as string;
       }
-
-      // ── Rollback helper for payment sub-writes ──
-      // Session RPC is already committed (atomic). Payment writes get their own cleanup.
-      let createdSaleId: string | null = null;
-      let createdSaleItemId: string | null = null;
-      let createdPaymentId: string | null = null;
-      let createdPkgPaymentId: string | null = null;
-
-      const rollbackPayment = async () => {
-        try {
-          if (createdPkgPaymentId) await adminClient.from('package_payments').delete().eq('id', createdPkgPaymentId);
-          if (createdPaymentId) await adminClient.from('payments').delete().eq('id', createdPaymentId);
-          if (createdSaleItemId) await adminClient.from('sale_items').delete().eq('id', createdSaleItemId);
-          if (createdSaleId) await adminClient.from('sales').delete().eq('id', createdSaleId);
-        } catch (rbErr) {
-          console.error('Payment rollback error (may be partially written):', rbErr);
-        }
-      };
-
-      // Create sale record (visible in Sales page + Reports)
-      const { data: saleData, error: saleError } = await adminClient
-        .from('sales')
-        .insert({
-          receipt_number: receiptNumber,
-          branch_id: branchId,
-          user_id: userId,
-          customer_id: pkgData.customer_id || null,
-          subtotal: payment_amount,
-          discount: 0,
-          tax: 0,
-          total: payment_amount,
-          status: 'completed',
-          payment_type: 'full',
-          notes: `Installment payment — ${serviceName} (${customerName})`,
-        } as Record<string, unknown>)
-        .select('id, receipt_number')
-        .single();
-
-      if (saleError) {
-        console.error('Installment sale creation error:', saleError);
-        return jsonError(`Failed to create sale record: ${saleError.message}`, 500);
-      }
-
-      saleRecord = saleData as Record<string, unknown>;
-      createdSaleId = saleRecord.id as string;
-
-      // Create sale_items entry
-      const { data: saleItemData, error: saleItemError } = await adminClient.from('sale_items').insert({
-        sale_id: createdSaleId,
-        item_type: 'service',
-        service_id: pkgData.service_id,
-        name: `${serviceName} — Installment Payment`,
-        quantity: 1,
-        unit_price: payment_amount,
-        total_price: payment_amount,
-      } as Record<string, unknown>).select('id').single();
-
-      if (saleItemError) {
-        console.error('sale_items insert failed, rolling back:', saleItemError.message);
-        await rollbackPayment();
-        return jsonError(`Failed to create sale item: ${saleItemError.message}`, 500);
-      }
-      createdSaleItemId = (saleItemData as Record<string, unknown>).id as string;
-
-      // Create payment entry
-      const { data: paymentData, error: paymentInsertError } = await adminClient.from('payments').insert({
-        sale_id: createdSaleId,
-        method: payment_method,
-        amount: payment_amount,
-        reference_number: reference_number || null,
-      } as Record<string, unknown>).select('id').single();
-
-      if (paymentInsertError) {
-        console.error('payments insert failed, rolling back:', paymentInsertError.message);
-        await rollbackPayment();
-        return jsonError(`Failed to create payment record: ${paymentInsertError.message}`, 500);
-      }
-      createdPaymentId = (paymentData as Record<string, unknown>).id as string;
-
-      // Record in package_payments ledger
-      const { data: ppData, error: ppError } = await adminClient.from('package_payments').insert({
-        package_id: packageId,
-        branch_id: branchId,
-        received_by: userId,
-        amount: payment_amount,
-        method: payment_method,
-        reference_number: reference_number || null,
-        notes: `Installment payment — Receipt ${saleRecord.receipt_number}`,
-      } as Record<string, unknown>).select('id').single();
-
-      if (ppError) {
-        console.error('package_payments insert failed, rolling back:', ppError.message);
-        await rollbackPayment();
-        return jsonError(`Failed to create package payment ledger: ${ppError.message}`, 500);
-      }
-      createdPkgPaymentId = (ppData as Record<string, unknown>).id as string;
-
-      // Update package totals
-      const newTotalPaid = Number(pkgData.total_paid) + payment_amount;
-      const newBalance = Math.max(0, Number(pkgData.total_price) - newTotalPaid);
-      const { error: updateErr } = await adminClient.from('patient_packages').update({
-        total_paid: newTotalPaid,
-        remaining_balance: newBalance,
-      } as Record<string, unknown>).eq('id', packageId);
-
-      if (updateErr) {
-        console.error('patient_packages totals update failed, rolling back:', updateErr.message);
-        await rollbackPayment();
-        return jsonError(`Failed to update package totals: ${updateErr.message}`, 500);
-      }
     }
 
-    // ─── 3. Audit Log ──────────────────────────────────────────
+    // ─── Derive service name + customer name for sale record ──
+    const serviceName = (pkgData.services as Record<string, unknown>)?.name as string || 'Package Service';
+    const customerName = pkgData.customers
+      ? `${(pkgData.customers as Record<string, unknown>).first_name} ${(pkgData.customers as Record<string, unknown>).last_name}`
+      : 'Walk-in';
+
+    // ─── Call atomic RPC ─────────────────────────────────────
+    // Everything (session, BOM, commission, sale, payment, package_payment)
+    // is handled in ONE Postgres transaction. Any failure = full rollback.
+    const { data: result, error: rpcError } = await adminClient
+      .rpc('record_package_visit', {
+        p_package_id:       packageId,
+        p_branch_id:        branchId,
+        p_performed_by:     userId,
+        p_doctor_id:        doctor_id || null,
+        p_sessions_count:   sessions_count,
+        p_notes:            notes || null,
+        p_payment_amount:   payment_amount,
+        p_payment_method:   payment_method,
+        p_reference_number: reference_number || null,
+        p_receipt_number:   receiptNumber,
+        p_customer_id:      pkgData.customer_id || null,
+        p_service_name:     `${serviceName} (${customerName})`,
+      });
+
+    if (rpcError) {
+      // Map known RPC errors to user-friendly responses
+      const msg = rpcError.message;
+      if (msg.includes('Package not found'))       return jsonError('Package not found', 404);
+      if (msg.includes('cannot consume sessions')) return jsonError(msg, 400);
+      if (msg.includes('Branch mismatch'))         return jsonError('Branch mismatch', 403);
+      if (msg.includes('Insufficient sessions'))   return jsonError(msg, 400);
+      if (msg.includes('Insufficient stock'))      return jsonError(msg, 400);
+      if (msg.includes('exceeds remaining'))       return jsonError(msg, 400);
+      if (msg.includes('Payment rejected'))        return jsonError(msg, 400);
+      if (msg.includes('Doctor'))                  return jsonError(msg, 400);
+      console.error('record_package_visit RPC error:', rpcError);
+      return jsonError(msg, 500);
+    }
+
+    const rpcResult = result as Record<string, unknown>;
+
+    // ─── Audit Log (non-critical, outside the transaction) ───
     const auditDesc = payment_amount > 0
       ? `${sessions_count} session(s) consumed + ₱${payment_amount.toFixed(2)} installment payment. ${rpcResult.sessions_remaining} sessions remaining.${rpcResult.auto_completed ? ' Package auto-completed.' : ''}`
       : `${sessions_count} session(s) consumed from package. ${rpcResult.sessions_remaining} remaining.${rpcResult.auto_completed ? ' Package auto-completed.' : ''}`;
@@ -273,16 +182,18 @@ export async function POST(
         sessions_count,
         doctor_id,
         payment_amount: payment_amount > 0 ? payment_amount : undefined,
-        sale_id: saleRecord ? (saleRecord as Record<string, unknown>).id : undefined,
-        receipt_number: saleRecord ? (saleRecord as Record<string, unknown>).receipt_number : undefined,
+        sale_id: rpcResult.sale_id || undefined,
+        receipt_number: rpcResult.receipt_number || undefined,
       },
     } as Record<string, unknown>);
 
     return NextResponse.json({
       data: {
-        ...rpcResult,
-        payment_recorded: payment_amount > 0,
-        receipt_number: saleRecord ? (saleRecord as Record<string, unknown>).receipt_number : null,
+        session_id: rpcResult.session_id,
+        sessions_remaining: rpcResult.sessions_remaining,
+        auto_completed: rpcResult.auto_completed,
+        payment_recorded: rpcResult.payment_recorded,
+        receipt_number: rpcResult.receipt_number || null,
       },
     }, { status: 201 });
   } catch (error) {
