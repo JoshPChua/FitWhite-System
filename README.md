@@ -329,6 +329,7 @@ They create every table, index, function, trigger, and RLS policy the system nee
 | `013_lockdown_rpc_permissions.sql` | Locks SECURITY DEFINER RPCs to service_role only |
 | `014_auditor_rls_hardening.sql` | Auditor excluded from all INSERT/UPDATE/DELETE RLS policies |
 | `015_customer_lifecycle_session_accuracy.sql` | Customer lifecycle triggers + session soft-void support |
+| `016_category_tables.sql` | Normalised category tables with expression unique indices, backfill from text columns |
 
 ### Seed Files
 
