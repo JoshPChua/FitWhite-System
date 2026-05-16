@@ -45,10 +45,10 @@ export async function POST(
 
     const adminClient = createAdminClient();
 
-    // Fetch the package
+    // Fetch the package with service + customer info for receipt
     const { data: pkg } = await adminClient
       .from('patient_packages')
-      .select('*')
+      .select('*, services:service_id(name), customers:customer_id(first_name, last_name)')
       .eq('id', packageId)
       .single();
 
@@ -81,7 +81,78 @@ export async function POST(
       );
     }
 
-    // Insert payment (DB trigger updates total_paid & enforces over-payment guard)
+    // ─── Create Sale + Receipt for audit trail ──────────────────
+    const serviceName = (pkgData.services as Record<string, unknown>)?.name as string || 'Package Service';
+    const customerName = pkgData.customers
+      ? `${(pkgData.customers as Record<string, unknown>).first_name} ${(pkgData.customers as Record<string, unknown>).last_name}`
+      : 'Walk-in';
+
+    // Generate receipt number
+    const { data: branchInfo } = await adminClient
+      .from('branches').select('code').eq('id', branchId).single();
+    const branchCode = branchInfo ? (branchInfo as Record<string, unknown>).code as string : 'FW';
+
+    let receiptNumber = '';
+    const { data: receiptData, error: receiptErr } = await adminClient
+      .rpc('generate_receipt_number', { branch_code: branchCode });
+
+    if (receiptErr || !receiptData) {
+      const now = new Date();
+      const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+      const rand = String(Math.floor(Math.random() * 9000) + 1000);
+      receiptNumber = `${branchCode}-${dateStr}-${rand}`;
+    } else {
+      receiptNumber = receiptData as string;
+    }
+
+    let saleRecord: Record<string, unknown> | null = null;
+
+    // Create sale record (visible in Sales page + Customer transactions + Reports)
+    const { data: saleData, error: saleError } = await adminClient
+      .from('sales')
+      .insert({
+        receipt_number: receiptNumber,
+        branch_id: branchId,
+        user_id: userId,
+        customer_id: pkgData.customer_id || null,
+        subtotal: amount,
+        discount: 0,
+        tax: 0,
+        total: amount,
+        status: 'completed',
+        payment_type: 'installment',
+        notes: `Installment payment — ${serviceName} (${customerName})`,
+      } as Record<string, unknown>)
+      .select('id, receipt_number')
+      .single();
+
+    if (saleError) {
+      console.error('Installment sale creation error:', saleError);
+    } else {
+      saleRecord = saleData as Record<string, unknown>;
+      const saleId = saleRecord.id as string;
+
+      // Create sale_items entry
+      await adminClient.from('sale_items').insert({
+        sale_id: saleId,
+        item_type: 'service',
+        item_id: pkgData.service_id,
+        name: `${serviceName} — Installment Payment`,
+        quantity: 1,
+        unit_price: amount,
+        total_price: amount,
+      } as Record<string, unknown>);
+
+      // Create payment entry
+      await adminClient.from('payments').insert({
+        sale_id: saleId,
+        method,
+        amount,
+        reference_number: reference_number || null,
+      } as Record<string, unknown>);
+    }
+
+    // ─── Insert package payment (DB trigger updates total_paid) ──
     const { data: payment, error: paymentError } = await adminClient
       .from('package_payments')
       .insert({
@@ -91,7 +162,9 @@ export async function POST(
         amount,
         method,
         reference_number: reference_number || null,
-        notes: notes || null,
+        notes: saleRecord
+          ? `Installment payment — Receipt ${(saleRecord as Record<string, unknown>).receipt_number}`
+          : (notes || null),
       } as Record<string, unknown>)
       .select('*')
       .single();
@@ -114,16 +187,17 @@ export async function POST(
       action_type: 'PACKAGE_PAYMENT',
       entity_type: 'package_payment',
       entity_id: (payment as Record<string, unknown>).id as string,
-      description: `Payment of ₱${amount.toFixed(2)} received via ${method} for package ${packageId}`,
-      metadata: { package_id: packageId, amount, method, reference_number },
+      description: `Payment of ₱${amount.toFixed(2)} received via ${method} for package ${packageId}${saleRecord ? ` — Receipt ${(saleRecord as Record<string, unknown>).receipt_number}` : ''}`,
+      metadata: { package_id: packageId, amount, method, reference_number, receipt_number: saleRecord ? (saleRecord as Record<string, unknown>).receipt_number : null },
     } as Record<string, unknown>);
 
-    return NextResponse.json({ data: payment }, { status: 201 });
+    return NextResponse.json({ data: payment, receipt_number: saleRecord ? (saleRecord as Record<string, unknown>).receipt_number : null }, { status: 201 });
   } catch (error) {
     console.error('POST /api/packages/[id]/payments error:', error);
     return jsonError('Internal server error', 500);
   }
 }
+
 
 /**
  * GET /api/packages/[id]/payments

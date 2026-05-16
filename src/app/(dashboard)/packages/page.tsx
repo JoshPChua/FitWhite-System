@@ -67,15 +67,13 @@ export default function PackagesPage() {
   const [pkgPayments, setPkgPayments] = useState<PackagePayment[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
-  // Record Session Modal
-  const [showSessionModal, setShowSessionModal] = useState(false);
-  const [sessionForm, setSessionForm] = useState({ doctor_id: '', notes: '', sessions_count: '1' });
-  const [sessionSubmitting, setSessionSubmitting] = useState(false);
-
-  // Record Payment Modal
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [paymentForm, setPaymentForm] = useState({ amount: '', method: 'cash', reference_number: '', notes: '' });
-  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
+  // Record Visit Modal (combined session + optional payment)
+  const [showVisitModal, setShowVisitModal] = useState(false);
+  const [visitForm, setVisitForm] = useState({
+    doctor_id: '', notes: '', sessions_count: '1',
+    payment_amount: '', payment_method: 'cash', reference_number: '',
+  });
+  const [visitSubmitting, setVisitSubmitting] = useState(false);
 
   // Complete Package Modal
   const [showCompleteModal, setShowCompleteModal] = useState(false);
@@ -212,65 +210,37 @@ export default function PackagesPage() {
     }
   };
 
-  // ─── Record Session ──────────────────────────────────────
+  // ─── Record Visit (combined session + payment) ────────────
 
-  const handleRecordSession = async () => {
+  const handleRecordVisit = async () => {
     if (!selectedPkg) return;
-    setSessionSubmitting(true);
+    setVisitSubmitting(true);
     setFormError('');
     try {
+      const paymentAmount = parseFloat(visitForm.payment_amount) || 0;
+
       const res = await fetch(`/api/packages/${selectedPkg.id}/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          sessions_count: parseInt(sessionForm.sessions_count) || 1,
-          doctor_id: sessionForm.doctor_id || null,
-          notes: sessionForm.notes || null,
+          sessions_count: parseInt(visitForm.sessions_count) || 1,
+          doctor_id: visitForm.doctor_id || null,
+          notes: visitForm.notes || null,
+          payment_amount: paymentAmount,
+          payment_method: visitForm.payment_method,
+          reference_number: visitForm.reference_number || null,
         }),
       });
       const result = await res.json();
       if (!res.ok) { setFormError(result.error); return; }
-      setShowSessionModal(false);
-      setSessionForm({ doctor_id: '', notes: '', sessions_count: '1' });
+      setShowVisitModal(false);
+      setVisitForm({ doctor_id: '', notes: '', sessions_count: '1', payment_amount: '', payment_method: 'cash', reference_number: '' });
       await refreshDetailAfterWrite(selectedPkg.id);
     } catch (err) {
-      console.error('Record session error:', err);
+      console.error('Record visit error:', err);
       setFormError('An unexpected error occurred');
     } finally {
-      setSessionSubmitting(false);
-    }
-  };
-
-  // ─── Record Payment ──────────────────────────────────────
-
-  const handleRecordPayment = async () => {
-    if (!selectedPkg) return;
-    setPaymentSubmitting(true);
-    setFormError('');
-    try {
-      const amount = parseFloat(paymentForm.amount);
-      if (isNaN(amount) || amount <= 0) { setFormError('Enter a valid amount'); return; }
-
-      const res = await fetch(`/api/packages/${selectedPkg.id}/payments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          amount,
-          method: paymentForm.method,
-          reference_number: paymentForm.reference_number || null,
-          notes: paymentForm.notes || null,
-        }),
-      });
-      const result = await res.json();
-      if (!res.ok) { setFormError(result.error); return; }
-      setShowPaymentModal(false);
-      setPaymentForm({ amount: '', method: 'cash', reference_number: '', notes: '' });
-      await refreshDetailAfterWrite(selectedPkg.id);
-    } catch (err) {
-      console.error('Record payment error:', err);
-      setFormError('An unexpected error occurred');
-    } finally {
-      setPaymentSubmitting(false);
+      setVisitSubmitting(false);
     }
   };
 
@@ -511,20 +481,12 @@ export default function PackagesPage() {
             {selectedPkg.status === 'active' && (
               <div className="flex gap-3">
                 <button
-                  onClick={() => { setShowSessionModal(true); setFormError(''); }}
+                  onClick={() => { setShowVisitModal(true); setFormError(''); setVisitForm(f => ({ ...f, payment_amount: selectedPkg.remaining_balance > 0 ? '' : '0' })); }}
                   disabled={selectedPkg.sessions_used >= selectedPkg.total_sessions}
                   className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white text-sm font-medium
                              hover:from-brand-700 hover:to-brand-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
                 >
-                  📋 Record Session
-                </button>
-                <button
-                  onClick={() => { setShowPaymentModal(true); setFormError(''); }}
-                  disabled={selectedPkg.remaining_balance <= 0}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 text-white text-sm font-medium
-                             hover:from-emerald-700 hover:to-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm"
-                >
-                  💳 Record Payment
+                  📋 Record Visit
                 </button>
                 <button
                   onClick={() => { setShowCompleteModal(true); setFormError(''); }}
@@ -587,12 +549,12 @@ export default function PackagesPage() {
         )}
       </Modal>
 
-      {/* ═══ Record Session Modal ════════════════════════════ */}
+      {/* ═══ Record Visit Modal (Combined Session + Optional Payment) ═══ */}
       <Modal
-        isOpen={showSessionModal}
-        onClose={() => setShowSessionModal(false)}
-        title="Record Session"
-        subtitle={selectedPkg ? `${selectedPkg.service_name} — ${selectedPkg.sessions_used + 1}/${selectedPkg.total_sessions}` : ''}
+        isOpen={showVisitModal}
+        onClose={() => setShowVisitModal(false)}
+        title="Record Visit"
+        subtitle={selectedPkg ? `${selectedPkg.service_name} — Session ${selectedPkg.sessions_used + 1} of ${selectedPkg.total_sessions}` : ''}
         size="sm"
       >
         <div className="space-y-4">
@@ -600,9 +562,26 @@ export default function PackagesPage() {
             <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{formError}</div>
           )}
 
+          {/* Session info banner */}
+          {selectedPkg && (
+            <div className="bg-brand-50 border border-brand-200 rounded-xl p-3">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-brand-600 font-medium">Sessions remaining</span>
+                <span className="text-brand-800 font-semibold">{selectedPkg.total_sessions - selectedPkg.sessions_used} of {selectedPkg.total_sessions}</span>
+              </div>
+              {selectedPkg.remaining_balance > 0 && (
+                <div className="flex items-center justify-between text-sm mt-1">
+                  <span className="text-rose-500 font-medium">Outstanding balance</span>
+                  <span className="text-rose-600 font-semibold">{formatCurrency(selectedPkg.remaining_balance)}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Doctor */}
           <div>
             <label className="block text-sm font-medium text-brand-800 mb-1.5">Attending Doctor <span className="text-brand-300 font-normal">(optional)</span></label>
-            <select value={sessionForm.doctor_id} onChange={e => setSessionForm({ ...sessionForm, doctor_id: e.target.value })}
+            <select value={visitForm.doctor_id} onChange={e => setVisitForm({ ...visitForm, doctor_id: e.target.value })}
               className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
                          focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all">
               <option value="">No doctor</option>
@@ -610,35 +589,101 @@ export default function PackagesPage() {
             </select>
           </div>
 
+          {/* Sessions to deduct */}
           <div>
             <label className="block text-sm font-medium text-brand-800 mb-1.5">Sessions to Deduct</label>
-            <input type="number" value={sessionForm.sessions_count} min="1"
+            <input type="number" value={visitForm.sessions_count} min="1"
               max={selectedPkg ? selectedPkg.total_sessions - selectedPkg.sessions_used : 1}
-              onChange={e => setSessionForm({ ...sessionForm, sessions_count: e.target.value })}
+              onChange={e => setVisitForm({ ...visitForm, sessions_count: e.target.value })}
               className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
                          focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all" />
-            {selectedPkg && (
-              <p className="text-[10px] text-brand-400 mt-1">
-                Remaining: {selectedPkg.total_sessions - selectedPkg.sessions_used} of {selectedPkg.total_sessions} sessions
-              </p>
-            )}
           </div>
 
+          {/* Payment toggle — only show if there's a remaining balance */}
+          {selectedPkg && selectedPkg.remaining_balance > 0 && (
+            <>
+              {/* Toggle: session-only vs session+payment */}
+              <div className="flex rounded-xl border border-brand-200 overflow-hidden bg-white">
+                <button type="button"
+                  onClick={() => setVisitForm(f => ({ ...f, payment_amount: '0' }))}
+                  className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                    visitForm.payment_amount === '0' || visitForm.payment_amount === ''
+                      ? 'bg-brand-600 text-white' : 'text-brand-500 hover:bg-brand-50'
+                  }`}>
+                  Session Only (no payment)
+                </button>
+                <button type="button"
+                  onClick={() => setVisitForm(f => ({ ...f, payment_amount: '' }))}
+                  className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                    visitForm.payment_amount !== '0' && visitForm.payment_amount !== ''
+                      ? 'bg-emerald-600 text-white' : 'text-brand-500 hover:bg-brand-50'
+                  }`}>
+                  Session + Payment
+                </button>
+              </div>
+
+              {/* Payment fields (shown when payment is selected) */}
+              {visitForm.payment_amount !== '0' && visitForm.payment_amount !== '' ? (
+                <div className="space-y-3 bg-emerald-50/50 border border-emerald-100 rounded-xl p-3">
+                  <div>
+                    <label className="block text-xs font-medium text-brand-700 mb-1">Payment Amount (₱)</label>
+                    <input type="number" value={visitForm.payment_amount} min="1" step="0.01"
+                      onChange={e => setVisitForm({ ...visitForm, payment_amount: e.target.value })}
+                      placeholder={`Max: ${selectedPkg.remaining_balance.toFixed(2)}`}
+                      className="w-full px-4 py-2 rounded-xl border border-brand-200 bg-white text-brand-900 placeholder:text-brand-300 text-sm
+                                 focus:outline-none focus:ring-2 focus:ring-emerald-400/50 transition-all" />
+                    {parseFloat(visitForm.payment_amount) > 0 && (
+                      <p className="text-[10px] text-emerald-600 mt-1 font-medium">
+                        After this payment: {formatCurrency(Math.max(0, selectedPkg.remaining_balance - parseFloat(visitForm.payment_amount)))} remaining
+                      </p>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-medium text-brand-700 mb-1">Method</label>
+                      <select value={visitForm.payment_method} onChange={e => setVisitForm({ ...visitForm, payment_method: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl border border-brand-200 bg-white text-brand-900 text-sm
+                                   focus:outline-none focus:ring-2 focus:ring-emerald-400/50 transition-all">
+                        <option value="cash">Cash</option>
+                        <option value="gcash">GCash</option>
+                        <option value="card">Card</option>
+                        <option value="bank_transfer">Bank Transfer</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-brand-700 mb-1">Reference #</label>
+                      <input type="text" value={visitForm.reference_number}
+                        onChange={e => setVisitForm({ ...visitForm, reference_number: e.target.value })}
+                        placeholder="Optional"
+                        className="w-full px-3 py-2 rounded-xl border border-brand-200 bg-white text-brand-900 placeholder:text-brand-300 text-sm
+                                   focus:outline-none focus:ring-2 focus:ring-emerald-400/50 transition-all" />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-brand-400 bg-surface-50 rounded-xl px-4 py-3 text-center">
+                  💡 No payment will be collected for this visit. Select "Session + Payment" above to include an installment.
+                </p>
+              )}
+            </>
+          )}
+
+          {/* Notes */}
           <div>
             <label className="block text-sm font-medium text-brand-800 mb-1.5">Notes <span className="text-brand-300 font-normal">(optional)</span></label>
-            <textarea value={sessionForm.notes} onChange={e => setSessionForm({ ...sessionForm, notes: e.target.value })}
-              rows={2} placeholder="Session notes..."
+            <textarea value={visitForm.notes} onChange={e => setVisitForm({ ...visitForm, notes: e.target.value })}
+              rows={2} placeholder="Visit notes..."
               className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900 placeholder:text-brand-300
                          focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all resize-none" />
           </div>
 
           <div className="flex gap-3 pt-2">
-            <button onClick={handleRecordSession} disabled={sessionSubmitting}
+            <button onClick={handleRecordVisit} disabled={visitSubmitting}
               className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-brand-600 to-brand-700 text-white font-medium text-sm
                          hover:from-brand-700 hover:to-brand-800 disabled:opacity-60 disabled:cursor-not-allowed transition-all shadow-sm">
-              {sessionSubmitting ? 'Recording...' : 'Record Session'}
+              {visitSubmitting ? 'Recording...' : (parseFloat(visitForm.payment_amount) > 0 ? '📋 Record Visit + Payment' : '📋 Record Visit')}
             </button>
-            <button onClick={() => setShowSessionModal(false)}
+            <button onClick={() => setShowVisitModal(false)}
               className="px-4 py-2.5 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">
               Cancel
             </button>
@@ -646,64 +691,7 @@ export default function PackagesPage() {
         </div>
       </Modal>
 
-      {/* ═══ Record Payment Modal ════════════════════════════ */}
-      <Modal
-        isOpen={showPaymentModal}
-        onClose={() => setShowPaymentModal(false)}
-        title="Record Installment Payment"
-        subtitle={selectedPkg ? `Balance: ${formatCurrency(selectedPkg.remaining_balance)}` : ''}
-        size="sm"
-      >
-        <div className="space-y-4">
-          {formError && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl text-sm">{formError}</div>
-          )}
 
-          <div>
-            <label className="block text-sm font-medium text-brand-800 mb-1.5">Amount (PHP)</label>
-            <input type="number" value={paymentForm.amount} min="1" step="0.01"
-              onChange={e => setPaymentForm({ ...paymentForm, amount: e.target.value })}
-              placeholder={selectedPkg ? `Max: ${selectedPkg.remaining_balance.toFixed(2)}` : '0.00'}
-              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900 placeholder:text-brand-300
-                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all" />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-brand-800 mb-1.5">Payment Method</label>
-            <select value={paymentForm.method} onChange={e => setPaymentForm({ ...paymentForm, method: e.target.value })}
-              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900
-                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all">
-              <option value="cash">Cash</option>
-              <option value="gcash">GCash</option>
-              <option value="card">Card</option>
-              <option value="bank_transfer">Bank Transfer</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-brand-800 mb-1.5">Reference # <span className="text-brand-300 font-normal">(optional)</span></label>
-            <input type="text" value={paymentForm.reference_number}
-              onChange={e => setPaymentForm({ ...paymentForm, reference_number: e.target.value })}
-              placeholder="e.g. GCash ref #"
-              className="w-full px-4 py-2.5 rounded-xl border border-brand-200 bg-surface-50 text-brand-900 placeholder:text-brand-300
-                         focus:outline-none focus:ring-2 focus:ring-brand-400/50 transition-all" />
-          </div>
-
-          <div className="flex gap-3 pt-2">
-            <button onClick={handleRecordPayment} disabled={paymentSubmitting}
-              className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-700 text-white font-medium text-sm
-                         hover:from-emerald-700 hover:to-emerald-800 disabled:opacity-60 disabled:cursor-not-allowed transition-all shadow-sm">
-              {paymentSubmitting ? 'Processing...' : 'Record Payment'}
-            </button>
-            <button onClick={() => setShowPaymentModal(false)}
-              className="px-4 py-2.5 rounded-xl border border-brand-200 text-brand-600 text-sm font-medium hover:bg-brand-50 transition-colors">
-              Cancel
-            </button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* ═══ Complete Package Modal ════════════════════════════ */}
       <Modal
         isOpen={showCompleteModal}
         onClose={() => setShowCompleteModal(false)}

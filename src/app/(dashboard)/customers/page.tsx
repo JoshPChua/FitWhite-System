@@ -996,14 +996,21 @@ export default function CustomersPage() {
                 </div>
               ) : (
                 <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-                  {customerSales.map(sale => (
-                    <div key={sale.id} className="bg-surface-50 rounded-xl p-3.5 border border-brand-100/50">
+                  {customerSales.map(sale => {
+                    const isInstallment = (sale.items || []).some(i => i.name.includes('Installment Payment'));
+                    return (
+                    <div key={sale.id} className={`bg-surface-50 rounded-xl p-3.5 border ${isInstallment ? 'border-amber-200/80' : 'border-brand-100/50'}`}>
                       <div className="flex items-center justify-between gap-3 mb-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-xs font-mono text-brand-600">{sale.receipt_number}</span>
                           <Badge variant={sale.status === 'completed' ? 'success' : sale.status === 'voided' ? 'default' : 'warning'} size="sm">
                             {sale.status.replace('_', ' ')}
                           </Badge>
+                          {isInstallment && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold uppercase">
+                              📦 Installment
+                            </span>
+                          )}
                         </div>
                         <span className="text-sm font-semibold text-brand-800">{formatCurrency(sale.total)}</span>
                       </div>
@@ -1023,7 +1030,8 @@ export default function CustomersPage() {
                         </div>
                       )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

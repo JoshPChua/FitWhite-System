@@ -519,6 +519,67 @@ export default function ReportsPage() {
     downloadCsv(csvHeader('Payment Methods Breakdown') + toCsv(rows, columns), `payment-methods-${filterPeriod}.csv`);
   };
 
+  // ─── NEW: Installment Payments Detail CSV ──────────────────
+  const handleExportInstallments = async () => {
+    const branchFilter = isOwner
+      ? (filterBranch || null)
+      : (selectedBranch?.id ?? profile?.branch_id ?? '__none__');
+    const periodDays = filterPeriod === '7d' ? 7 : filterPeriod === '30d' ? 30 : filterPeriod === '90d' ? 90 : null;
+    let ppDateFrom: string | null = null;
+    let ppDateTo: string | null = null;
+    if (filterPeriod === 'custom') {
+      if (customDateFrom) ppDateFrom = new Date(customDateFrom + 'T00:00:00').toISOString();
+      if (customDateTo) ppDateTo = new Date(customDateTo + 'T23:59:59').toISOString();
+    } else if (periodDays) {
+      ppDateFrom = new Date(Date.now() - periodDays * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    let q = supabase
+      .from('package_payments')
+      .select('*, receiver:received_by(first_name, last_name), package:package_id(total_price, total_paid, remaining_balance, total_sessions, sessions_used, services:service_id(name), customers:customer_id(first_name, last_name))')
+      .order('created_at', { ascending: false });
+    if (branchFilter) q = q.eq('branch_id', branchFilter);
+    if (ppDateFrom) q = q.gte('created_at', ppDateFrom);
+    if (ppDateTo) q = q.lte('created_at', ppDateTo);
+    const { data: ppData } = await q;
+    if (!ppData || ppData.length === 0) { alert('No installment payments to export'); return; }
+
+    type InstRow = { date: string; customer: string; service: string; amount: string; method: string; reference: string; receiver: string; pkg_total: string; pkg_paid: string; pkg_balance: string; sessions: string };
+    const rows: InstRow[] = (ppData as Record<string, unknown>[]).map(p => {
+      const pkg = p.package as Record<string, unknown> | null;
+      const svc = pkg?.services as Record<string, unknown> | null;
+      const cust = pkg?.customers as Record<string, unknown> | null;
+      const rcv = p.receiver as Record<string, unknown> | null;
+      return {
+        date: csvDate(p.created_at as string),
+        customer: cust ? `${cust.first_name} ${cust.last_name}` : 'Unknown',
+        service: svc?.name as string || 'Unknown',
+        amount: csvCurrency(Number(p.amount)),
+        method: paymentMethodLabels[p.method as string] || (p.method as string),
+        reference: (p.reference_number as string) || '',
+        receiver: rcv ? `${rcv.first_name} ${rcv.last_name}` : '',
+        pkg_total: pkg ? csvCurrency(Number(pkg.total_price)) : '',
+        pkg_paid: pkg ? csvCurrency(Number(pkg.total_paid)) : '',
+        pkg_balance: pkg ? csvCurrency(Number(pkg.remaining_balance)) : '',
+        sessions: pkg ? `${pkg.sessions_used}/${pkg.total_sessions}` : '',
+      };
+    });
+    const columns: CsvColumn<InstRow>[] = [
+      { header: 'Date & Time', accessor: r => r.date },
+      { header: 'Customer', accessor: r => r.customer },
+      { header: 'Service / Package', accessor: r => r.service },
+      { header: 'Payment Amount (PHP)', accessor: r => r.amount },
+      { header: 'Method', accessor: r => r.method },
+      { header: 'Reference #', accessor: r => r.reference },
+      { header: 'Received By', accessor: r => r.receiver },
+      { header: 'Package Total (PHP)', accessor: r => r.pkg_total },
+      { header: 'Total Paid (PHP)', accessor: r => r.pkg_paid },
+      { header: 'Remaining Balance (PHP)', accessor: r => r.pkg_balance },
+      { header: 'Sessions Used', accessor: r => r.sessions },
+    ];
+    downloadCsv(csvHeader('Installment Payments Detail Report') + toCsv(rows, columns), `installment-payments-${filterPeriod}.csv`);
+  };
+
   // ─── Render ─────────────────────────────────────────────
 
   return (
@@ -584,6 +645,11 @@ export default function ReportsPage() {
               <button onClick={handleExportPaymentMethods} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
                 💳 Payment Methods Breakdown
               </button>
+              {ENABLE_PATIENT_PACKAGES && (
+                <button onClick={handleExportInstallments} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
+                  📦 Installment Payments Detail
+                </button>
+              )}
               {ENABLE_SHIFTS && (
                 <button onClick={handleExportCashMovements} className="w-full text-left px-4 py-2 text-xs text-brand-700 hover:bg-brand-50 transition-colors">
                   💰 Cash Movements Report
